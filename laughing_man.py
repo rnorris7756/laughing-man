@@ -508,6 +508,60 @@ def _apply_privacy_blur(frame: np.ndarray, amount: float) -> None:
     cv2.addWeighted(frame, 1.0 - amount, blurred, amount, 0, dst=frame)
 
 
+def _resize_overlay_to_face_roi(
+    overlay_rgb: np.ndarray,
+    mask_l: np.ndarray,
+    aw: int,
+    ah: int,
+    scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Map the square overlay cache to the face ROI using a relative scale factor.
+
+    The cache is resized to roughly ``(aw * scale, ah * scale)``, then
+    center-cropped or center-padded with zeros to ``(aw, ah)``. Values above
+    ``1.0`` zoom into the center of the artwork; values below ``1.0`` shrink it
+    with transparent margins (mask zero).
+
+    Parameters
+    ----------
+    overlay_rgb
+        RGB uint8, square, same size as ``mask_l`` (typically ``min_dim``).
+    mask_l
+        Single-channel uint8 mask, same spatial size as ``overlay_rgb``.
+    aw
+        Face ROI width in pixels.
+    ah
+        Face ROI height in pixels.
+    scale
+        Relative size vs the face box; ``1.0`` matches prior behavior.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        ``(overlay_rgb, mask_l)`` both shaped ``(ah, aw)``.
+    """
+    if scale <= 0:
+        scale = 1.0
+    tw = max(1, int(round(aw * scale)))
+    th = max(1, int(round(ah * scale)))
+    ov = cv2.resize(overlay_rgb, (tw, th), interpolation=cv2.INTER_LINEAR)
+    mk = cv2.resize(mask_l, (tw, th), interpolation=cv2.INTER_LINEAR)
+    if tw == aw and th == ah:
+        return ov, mk
+    if tw >= aw and th >= ah:
+        x0 = (tw - aw) // 2
+        y0 = (th - ah) // 2
+        return ov[y0 : y0 + ah, x0 : x0 + aw], mk[y0 : y0 + ah, x0 : x0 + aw]
+    ov_pad = np.zeros((ah, aw, 3), dtype=np.uint8)
+    mk_pad = np.zeros((ah, aw), dtype=np.uint8)
+    x0 = (aw - tw) // 2
+    y0 = (ah - th) // 2
+    ov_pad[y0 : y0 + th, x0 : x0 + tw] = ov
+    mk_pad[y0 : y0 + th, x0 : x0 + tw] = mk
+    return ov_pad, mk_pad
+
+
 def smooth_and_draw(
     frame: np.ndarray,
     raw_face: tuple[int, int, int, int] | None,
@@ -519,6 +573,7 @@ def smooth_and_draw(
     size_lambda: float,
     no_face_blur_frames: int,
     show_preview: bool,
+    overlay_scale: float,
 ) -> None:
     """
     Apply full-frame privacy blur after consecutive no-face frames, temporal
@@ -549,6 +604,10 @@ def smooth_and_draw(
         blur; until then the last smoothed overlay position is held fixed.
     show_preview
         If True, show frames in an OpenCV window.
+    overlay_scale
+        Resize the overlay relative to the face ROI before blending (see
+        ``--scale``). ``1.0`` preserves the previous mapping from the square cache
+        to the face box.
     """
     frame_h, frame_w = frame.shape[:2]
 
@@ -616,8 +675,7 @@ def smooth_and_draw(
         return
 
     ah, aw = face_roi.shape[:2]
-    ov = cv2.resize(overlay_rgb, (aw, ah), interpolation=cv2.INTER_LINEAR)
-    mk = cv2.resize(mask_l, (aw, ah), interpolation=cv2.INTER_LINEAR)
+    ov, mk = _resize_overlay_to_face_roi(overlay_rgb, mask_l, aw, ah, overlay_scale)
 
     overlay_bgr = cv2.cvtColor(ov, cv2.COLOR_RGB2BGR).astype(np.float32)
     mask_f = (mk.astype(np.float32) / 255.0)[..., np.newaxis]
@@ -660,14 +718,21 @@ def _build_rotated_overlay_frame(
     im_sz: tuple[int, int],
     tmp_offset: float,
     min_dim: int,
+    custom_static_overlay: bool = False,
 ) -> Image.Image:
     """
     Composite stable art, rotating text, and masks; resize to the square ROI size.
 
+    When ``custom_static_overlay`` is True (``--image`` with a user PNG), the
+    stock white-ellipse backdrop and rotating layer are skipped: the overlay is
+    only ``st_img`` composited over black using ``st_alpha``, so transparent
+    pixels stay dark and do not pick up a white disk behind the art.
+
     Parameters
     ----------
     rot_angle
-        Rotation in degrees (typically a multiple of ``ROT_RESO``).
+        Rotation in degrees (typically a multiple of ``ROT_RESO``). Ignored when
+        ``custom_static_overlay`` is True.
     st_img, st_alpha, rot_img, rot_alpha
         Source layers (``st_*`` static, ``rot_*`` rotated each frame).
     im_sz
@@ -676,12 +741,19 @@ def _build_rotated_overlay_frame(
         Ellipse inset factor (same as ``TMP_OFFSET``).
     min_dim
         Edge length of the square overlay after resize.
+    custom_static_overlay
+        If True, build a single-layer composite for user-supplied overlay art.
 
     Returns
     -------
     Image.Image
         RGB ``Image`` ready for ``numpy.asarray(..., dtype=uint8)`` in the loop.
     """
+    if custom_static_overlay:
+        backing = Image.new("RGB", st_img.size, (0, 0, 0))
+        tmp_img = Image.composite(st_img, backing, st_alpha)
+        return tmp_img.resize((min_dim, min_dim))
+
     comb_img = Image.new("RGB", st_img.size)
     draw_img = ImageDraw.Draw(comb_img)
     draw_img.ellipse(
@@ -703,6 +775,49 @@ def _build_rotated_overlay_frame(
     return tmp_img.resize((min_dim, min_dim))
 
 
+def _load_overlay_images(
+    overlay_image: Path | None,
+) -> tuple[Image.Image, Image.Image]:
+    """
+    Load stable and rotating overlay layers.
+
+    When ``overlay_image`` is set, that file is the stable layer (RGBA); the
+    rotating layer is a same-size fully transparent image so the overlay does
+    not spin arbitrary artwork.
+
+    Parameters
+    ----------
+    overlay_image
+        Path to a PNG/JPEG/etc. to use instead of bundled ``limg.png`` /
+        ``ltext.png``. If None, bundled assets are loaded from the current
+        working directory.
+
+    Returns
+    -------
+    tuple[Image.Image, Image.Image]
+        ``(st_img, rot_img)`` as RGBA :class:`PIL.Image.Image` instances.
+    """
+    if overlay_image is not None:
+        p = overlay_image.expanduser().resolve()
+        if not p.is_file():
+            logger.error("Overlay image not found: {}", p)
+            raise typer.Exit(code=1)
+        try:
+            st_img = Image.open(p).convert("RGBA")
+        except OSError as e:
+            logger.error("Could not read overlay image {}: {}", p, e)
+            raise typer.Exit(code=1) from e
+        st_img.load()
+        rot_img = Image.new("RGBA", st_img.size, (0, 0, 0, 0))
+        return st_img, rot_img
+
+    st_img = Image.open(STABLE_IMAGE_NAME)
+    rot_img = Image.open(ROT_IMAGE_NAME)
+    st_img.load()
+    rot_img.load()
+    return st_img, rot_img
+
+
 def run_overlay(
     *,
     full_range: bool,
@@ -714,6 +829,8 @@ def run_overlay(
     v4l2_device: str | None,
     virtual_fps: float,
     show_preview: bool,
+    overlay_image: Path | None,
+    overlay_scale: float,
 ) -> None:
     """
     Run webcam capture with Laughing Man overlay.
@@ -745,6 +862,11 @@ def run_overlay(
     show_preview
         If True, show the OpenCV preview window. Disable with ``--no-preview``
         when streaming only to the virtual device.
+    overlay_image
+        If set, use this file as the face overlay instead of ``limg.png`` /
+        ``ltext.png`` from the current working directory.
+    overlay_scale
+        Scale factor for mapping overlay art onto the face ROI (see ``--scale``).
     """
     if not virtual_cam and not show_preview:
         logger.error(
@@ -786,10 +908,7 @@ def run_overlay(
     if show_preview:
         cv2.namedWindow(MAIN_WIN_NAME, cv2.WINDOW_AUTOSIZE)
 
-    st_img = Image.open(STABLE_IMAGE_NAME)
-    rot_img = Image.open(ROT_IMAGE_NAME)
-    st_img.load()
-    rot_img.load()
+    st_img, rot_img = _load_overlay_images(overlay_image)
 
     st_bands = st_img.split()
     rot_bands = rot_img.split()
@@ -798,18 +917,23 @@ def run_overlay(
     rot_angle = 0
 
     im_sz = st_img.size
-    mask_img = Image.new("L", st_img.size)
-    mask_draw = ImageDraw.Draw(mask_img)
-    mask_draw.ellipse(
-        (
-            im_sz[0] * TMP_OFFSET,
-            im_sz[1] * TMP_OFFSET,
-            im_sz[0] * (1 - TMP_OFFSET),
-            im_sz[1] * (1 - TMP_OFFSET),
-        ),
-        fill="white",
-    )
-    mask_img = ImageChops.lighter(ImageChops.lighter(mask_img, st_alpha), rot_alpha)
+    if overlay_image is not None:
+        # Respect the PNG's alpha only; do not OR in the stock HUD ellipse (that
+        # would force a full-disk blend and show white behind keyed transparency).
+        mask_img = ImageChops.lighter(st_alpha, rot_alpha)
+    else:
+        mask_img = Image.new("L", st_img.size)
+        mask_draw = ImageDraw.Draw(mask_img)
+        mask_draw.ellipse(
+            (
+                im_sz[0] * TMP_OFFSET,
+                im_sz[1] * TMP_OFFSET,
+                im_sz[0] * (1 - TMP_OFFSET),
+                im_sz[1] * (1 - TMP_OFFSET),
+            ),
+            fill="white",
+        )
+        mask_img = ImageChops.lighter(ImageChops.lighter(mask_img, st_alpha), rot_alpha)
 
     input_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     input_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -826,20 +950,36 @@ def run_overlay(
     def _prefill_rotated_overlay_cache() -> None:
         """Fill ``img_cache`` for all discrete rotation steps (runs in a helper thread)."""
         try:
-            for i in range(n_cache):
-                angle = i * ROT_RESO
-                img_cache[i].append(
-                    _build_rotated_overlay_frame(
-                        rot_angle=angle,
-                        st_img=st_img,
-                        st_alpha=st_alpha,
-                        rot_img=rot_img,
-                        rot_alpha=rot_alpha,
-                        im_sz=im_sz,
-                        tmp_offset=TMP_OFFSET,
-                        min_dim=min_dim,
-                    )
+            if overlay_image is not None:
+                shared = _build_rotated_overlay_frame(
+                    rot_angle=0,
+                    st_img=st_img,
+                    st_alpha=st_alpha,
+                    rot_img=rot_img,
+                    rot_alpha=rot_alpha,
+                    im_sz=im_sz,
+                    tmp_offset=TMP_OFFSET,
+                    min_dim=min_dim,
+                    custom_static_overlay=True,
                 )
+                for i in range(n_cache):
+                    img_cache[i].append(shared)
+            else:
+                for i in range(n_cache):
+                    angle = i * ROT_RESO
+                    img_cache[i].append(
+                        _build_rotated_overlay_frame(
+                            rot_angle=angle,
+                            st_img=st_img,
+                            st_alpha=st_alpha,
+                            rot_img=rot_img,
+                            rot_alpha=rot_alpha,
+                            im_sz=im_sz,
+                            tmp_offset=TMP_OFFSET,
+                            min_dim=min_dim,
+                            custom_static_overlay=False,
+                        )
+                    )
         except BaseException as e:
             prefill_exc.append(e)
 
@@ -952,6 +1092,7 @@ def run_overlay(
                         size_lambda=size_lambda_live,
                         no_face_blur_frames=no_face_blur_frames,
                         show_preview=show_preview,
+                        overlay_scale=overlay_scale,
                     )
 
                     if vcam is not None:
@@ -1107,6 +1248,29 @@ def main(
         "--debug",
         help="Verbose logging (overlay prefill, TFLite delegate, virtual camera details).",
     ),
+    image: Path | None = typer.Option(
+        None,
+        "--image",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+        help=(
+            "PNG/JPEG/etc. to composite on the face instead of the default "
+            "Laughing Man assets (limg.png / ltext.png)."
+        ),
+    ),
+    overlay_scale: float = typer.Option(
+        1.0,
+        "--scale",
+        min=0.05,
+        max=10.0,
+        help=(
+            "Scale overlay art relative to the detected face box (1.0 = default). "
+            "Above 1.0 zooms in on the center of the image; below 1.0 shrinks it "
+            "with clear margins. Applies to any overlay, including --image."
+        ),
+    ),
 ) -> None:
     """Run the Laughing Man webcam overlay."""
     _configure_logging(debug=debug)
@@ -1120,6 +1284,8 @@ def main(
         v4l2_device=v4l2_device,
         virtual_fps=virtual_fps,
         show_preview=not no_preview,
+        overlay_image=image,
+        overlay_scale=overlay_scale,
     )
 
 
