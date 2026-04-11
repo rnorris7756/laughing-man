@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -14,17 +15,18 @@ from laughing_man.constants import (
     DEFAULT_SIZE_LAMBDA,
 )
 from laughing_man.logging_setup import configure_logging
+from laughing_man.postprocess import run_postprocess
 from laughing_man.run import run_overlay
 
-app = typer.Typer(
+typer_app = typer.Typer(
     help="Webcam Laughing Man face overlay (MediaPipe BlazeFace + OpenCV).",
     add_completion=False,
     no_args_is_help=True,
 )
 
 
-@app.command()
-def main(
+@typer_app.command("run")
+def run(
     full_range: bool = typer.Option(
         False,
         "--full-range",
@@ -182,6 +184,130 @@ def main(
         cascade_margin=cascade_margin,
         roi_motion=roi_motion,
     )
+
+
+@typer_app.command("postprocess")
+def postprocess(
+    input_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+        help="Input image or video file (OpenCV-supported formats).",
+    ),
+    output_path: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        dir_okay=False,
+        resolve_path=True,
+        help="Output path. Default: <input stem>_overlay.png|.mp4 next to the input.",
+    ),
+    full_range: bool = typer.Option(
+        False,
+        "--full-range",
+        help=(
+            "Use BlazeFace full-range model (better for small/distant faces). "
+            "Default is short-range. Ignored for --face-backend yunet."
+        ),
+    ),
+    gpu: bool = typer.Option(
+        False,
+        "--gpu",
+        help="Use MediaPipe TFLite GPU delegate for BlazeFace when possible (falls back to CPU).",
+    ),
+    roi_lambda: float = typer.Option(
+        DEFAULT_ROI_LAMBDA,
+        "--roi-lambda",
+        min=0.0,
+        max=1.0,
+        help="Temporal smoothing on overlay position vs detector (same as ``laughing-man run``).",
+    ),
+    size_lambda: float = typer.Option(
+        DEFAULT_SIZE_LAMBDA,
+        "--size-lambda",
+        min=0.0,
+        max=1.0,
+        help="Temporal smoothing on face box width/height (same as ``laughing-man run``).",
+    ),
+    no_face_blur_frames: int = typer.Option(
+        DEFAULT_NO_FACE_BLUR_FRAMES,
+        "--no-face-blur-frames",
+        min=1,
+        help="Consecutive no-face frames before full-frame privacy blur.",
+    ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Verbose logging.",
+    ),
+    image: Path | None = typer.Option(
+        None,
+        "--image",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+        help="Overlay image (same as ``laughing-man run --image``); default is bundled art.",
+    ),
+    overlay_scale: float = typer.Option(
+        1.0,
+        "--scale",
+        min=0.05,
+        max=10.0,
+        help="Scale overlay art relative to the detected face box.",
+    ),
+    face_backend: Literal["blaze", "yunet"] = typer.Option(
+        "blaze",
+        "--face-backend",
+        help="Face detector backend (same as ``laughing-man run``).",
+    ),
+    cascade_margin: float = typer.Option(
+        0.0,
+        "--cascade-margin",
+        min=0.0,
+        max=2.0,
+        help="YuNet only: cascade crop expansion (same as ``laughing-man run``).",
+    ),
+    roi_motion: Literal["ema", "kalman", "kalman_flow"] = typer.Option(
+        DEFAULT_ROI_MOTION,
+        "--roi-motion",
+        help="ROI stabilization model (same as ``laughing-man run``).",
+    ),
+    preview: bool = typer.Option(
+        False,
+        "--preview",
+        help="Show an OpenCV preview window while processing.",
+    ),
+) -> None:
+    """Apply the Laughing Man face overlay to a still image or video file (offline)."""
+    configure_logging(debug=debug)
+    run_postprocess(
+        input_path=input_path,
+        output_path=output_path,
+        overlay_image=image,
+        overlay_scale=overlay_scale,
+        full_range=full_range,
+        use_gpu=gpu,
+        roi_lambda=roi_lambda,
+        size_lambda=size_lambda,
+        no_face_blur_frames=no_face_blur_frames,
+        face_backend=face_backend,
+        cascade_margin=cascade_margin,
+        roi_motion=roi_motion,
+        preview=preview,
+    )
+
+
+def app() -> None:
+    """CLI entry: default subcommand ``run`` when omitted (backward compatible)."""
+    argv = sys.argv
+    if len(argv) == 1:
+        argv.append("run")
+    elif len(argv) >= 2 and argv[1] not in ("run", "postprocess", "-h", "--help"):
+        argv.insert(1, "run")
+    typer_app()
 
 
 if __name__ == "__main__":
