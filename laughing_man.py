@@ -17,10 +17,12 @@ from pathlib import Path
 import cv2
 import mediapipe as mp
 import numpy as np
+import pyvirtualcam
 import typer
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from PIL import Image, ImageChops, ImageDraw
+from pyvirtualcam import PixelFormat
 
 # Haar cascades are poor for pose; BlazeFace is a better default. See:
 # https://ai.google.dev/edge/mediapipe/solutions/vision/face_detector
@@ -205,6 +207,7 @@ def smooth_and_draw(
     center_lambda: float,
     size_lambda: float,
     fadeout_lambda: float,
+    show_preview: bool,
 ) -> None:
     """
     Apply temporal smoothing to the face box, then alpha-composite the overlay.
@@ -228,6 +231,8 @@ def smooth_and_draw(
         detector; use greater than ``center_lambda`` when the box size flickers).
     fadeout_lambda
         Shrink factor per frame when no face is seen.
+    show_preview
+        If True, show frames in an OpenCV window.
     """
     frame_h, frame_w = frame.shape[:2]
 
@@ -280,13 +285,15 @@ def smooth_and_draw(
                 r = (ix, iy, iw, ih)
 
     if r is None:
-        cv2.imshow(MAIN_WIN_NAME, frame)
+        if show_preview:
+            cv2.imshow(MAIN_WIN_NAME, frame)
         return
 
     rx, ry, rw, rh = r
     face_roi = frame[ry : ry + rh, rx : rx + rw]
     if face_roi.size == 0:
-        cv2.imshow(MAIN_WIN_NAME, frame)
+        if show_preview:
+            cv2.imshow(MAIN_WIN_NAME, frame)
         return
 
     ov = cv2.resize(overlay_rgb, (rw, rh), interpolation=cv2.INTER_LINEAR)
@@ -298,7 +305,8 @@ def smooth_and_draw(
     blended = base * (1.0 - mask_f) + overlay_bgr * mask_f
     face_roi[:] = np.clip(blended, 0, 255).astype(np.uint8)
 
-    cv2.imshow(MAIN_WIN_NAME, frame)
+    if show_preview:
+        cv2.imshow(MAIN_WIN_NAME, frame)
 
 
 def _face_detector_options(
@@ -330,6 +338,10 @@ def run_overlay(
     roi_lambda: float,
     size_lambda: float,
     fadeout_lambda: float,
+    virtual_cam: bool,
+    v4l2_device: str | None,
+    virtual_fps: float,
+    show_preview: bool,
 ) -> None:
     """
     Run webcam capture with Laughing Man overlay.
@@ -352,7 +364,26 @@ def run_overlay(
         Temporal smoothing for **box width/height** (reduces detector size jitter).
     fadeout_lambda
         Shrink rate for the box when the face is lost.
+    virtual_cam
+        If True, send composited frames to a virtual camera (Linux: v4l2loopback;
+        Windows/macOS: OBS Virtual Camera when available) so other apps can
+        capture it.
+    v4l2_device
+        Path to the loopback device (e.g. ``/dev/video10``). If None, the first
+        available device is used.
+    virtual_fps
+        Target frame rate for the virtual camera (used when ``virtual_cam``).
+    show_preview
+        If True, show the OpenCV preview window. Disable with ``--no-preview``
+        when streaming only to the virtual device.
     """
+    if not virtual_cam and not show_preview:
+        print(
+            "ERROR: Need at least one of --virtual-cam or preview (omit --no-preview).",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
+
     model_path, model_url = _resolve_model(full_range)
     _ensure_blaze_face_model(model_path, model_url)
 
@@ -389,7 +420,8 @@ def run_overlay(
         print(f"ERROR: Could not open camera {CAMERA_INDEX}", file=sys.stderr)
         raise typer.Exit(code=1)
 
-    cv2.namedWindow(MAIN_WIN_NAME, cv2.WINDOW_AUTOSIZE)
+    if show_preview:
+        cv2.namedWindow(MAIN_WIN_NAME, cv2.WINDOW_AUTOSIZE)
 
     st_img = Image.open(STABLE_IMAGE_NAME)
     rot_img = Image.open(ROT_IMAGE_NAME)
@@ -418,6 +450,8 @@ def run_overlay(
 
     input_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     input_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    cap_fps = float(cap.get(cv2.CAP_PROP_FPS))
+    stream_fps = virtual_fps if virtual_fps > 0 else (cap_fps if cap_fps > 0 else 30.0)
     min_dim = min(input_h, input_w)
     mask_img = mask_img.resize((min_dim, min_dim))
 
@@ -429,7 +463,86 @@ def run_overlay(
     frame_ix = 0
     last_raw_face: tuple[int, int, int, int] | None = None
 
-    print("Press any key in the window to quit, or Ctrl+C to exit.", file=sys.stderr)
+    if show_preview:
+        print(
+            "Press any key in the preview window to quit, or Ctrl+C to exit.",
+            file=sys.stderr,
+        )
+    elif virtual_cam:
+        print("Streaming to virtual camera; press Ctrl+C to exit.", file=sys.stderr)
+
+    def run_capture_loop(
+        detector: vision.FaceDetector,
+        vcam: pyvirtualcam.Camera | None,
+    ) -> None:
+        nonlocal rot_angle, frame_ix, last_raw_face
+        while True:
+            try:
+                ok, frame = cap.read()
+                if not ok or frame is None or frame.size == 0:
+                    break
+
+                timestamp_ms = int((time.monotonic() - t0) * 1000.0)
+
+                cache_idx = rot_angle // ROT_RESO
+                if not img_cache[cache_idx]:
+                    print(f"Computing rotated overlay for angle {rot_angle}°.")
+                    comb_img = Image.new("RGB", st_img.size)
+                    draw_img = ImageDraw.Draw(comb_img)
+                    draw_img.ellipse(
+                        (
+                            im_sz[0] * TMP_OFFSET,
+                            im_sz[1] * TMP_OFFSET,
+                            im_sz[0] * (1 - TMP_OFFSET),
+                            im_sz[1] * (1 - TMP_OFFSET),
+                        ),
+                        fill="white",
+                    )
+                    rot_nearest = rot_img.rotate(rot_angle, Image.Resampling.NEAREST)
+                    rot_a_nearest = rot_alpha.rotate(rot_angle, Image.Resampling.NEAREST)
+                    tmp_img = Image.composite(
+                        st_img,
+                        Image.composite(rot_nearest, comb_img, rot_a_nearest),
+                        st_alpha,
+                    )
+                    tmp_img = tmp_img.resize((min_dim, min_dim))
+                    img_cache[cache_idx].append(tmp_img)
+                else:
+                    tmp_img = img_cache[cache_idx][0]
+
+                overlay_rgb = np.asarray(tmp_img.convert("RGB"))
+                mask_l = np.asarray(mask_img)
+
+                run_detection = detect_interval <= 1 or (frame_ix % detect_interval == 0)
+                if run_detection:
+                    last_raw_face = mediapipe_detect_face(detector, frame, timestamp_ms)
+
+                smooth_and_draw(
+                    frame,
+                    last_raw_face,
+                    roi_state,
+                    overlay_rgb,
+                    mask_l,
+                    center_lambda=roi_lambda,
+                    size_lambda=size_lambda,
+                    fadeout_lambda=fadeout_lambda,
+                    show_preview=show_preview,
+                )
+
+                if vcam is not None:
+                    vcam.send(frame)
+                    vcam.sleep_until_next_frame()
+
+                rot_angle = (rot_angle + ROT_RESO) % 360
+                frame_ix += 1
+
+                if show_preview:
+                    delay = 1 if virtual_cam else KEY_WAIT_DELAY_MS
+                    if cv2.waitKey(delay) >= 0:
+                        break
+            except KeyboardInterrupt:
+                print("Interrupted.", file=sys.stderr)
+                break
 
     try:
         with create_face_detector() as detector:
@@ -438,67 +551,33 @@ def run_overlay(
                 f"(requested {'GPU' if use_gpu else 'CPU'}).",
                 file=sys.stderr,
             )
-            while True:
+            if virtual_cam:
                 try:
-                    ok, frame = cap.read()
-                    if not ok or frame is None or frame.size == 0:
-                        break
-
-                    timestamp_ms = int((time.monotonic() - t0) * 1000.0)
-
-                    cache_idx = rot_angle // ROT_RESO
-                    if not img_cache[cache_idx]:
-                        print(f"Computing rotated overlay for angle {rot_angle}°.")
-                        comb_img = Image.new("RGB", st_img.size)
-                        draw_img = ImageDraw.Draw(comb_img)
-                        draw_img.ellipse(
-                            (
-                                im_sz[0] * TMP_OFFSET,
-                                im_sz[1] * TMP_OFFSET,
-                                im_sz[0] * (1 - TMP_OFFSET),
-                                im_sz[1] * (1 - TMP_OFFSET),
-                            ),
-                            fill="white",
+                    with pyvirtualcam.Camera(
+                        width=input_w,
+                        height=input_h,
+                        fps=stream_fps,
+                        fmt=PixelFormat.BGR,
+                        device=v4l2_device,
+                    ) as vcam:
+                        print(
+                            f"Virtual camera: {vcam.device} ({vcam.backend}), "
+                            f"{input_w}x{input_h} @ {stream_fps:.1f} fps.",
+                            file=sys.stderr,
                         )
-                        rot_nearest = rot_img.rotate(rot_angle, Image.Resampling.NEAREST)
-                        rot_a_nearest = rot_alpha.rotate(rot_angle, Image.Resampling.NEAREST)
-                        tmp_img = Image.composite(
-                            st_img,
-                            Image.composite(rot_nearest, comb_img, rot_a_nearest),
-                            st_alpha,
-                        )
-                        tmp_img = tmp_img.resize((min_dim, min_dim))
-                        img_cache[cache_idx].append(tmp_img)
-                    else:
-                        tmp_img = img_cache[cache_idx][0]
-
-                    overlay_rgb = np.asarray(tmp_img.convert("RGB"))
-                    mask_l = np.asarray(mask_img)
-
-                    run_detection = detect_interval <= 1 or (frame_ix % detect_interval == 0)
-                    if run_detection:
-                        last_raw_face = mediapipe_detect_face(
-                            detector, frame, timestamp_ms
-                        )
-
-                    smooth_and_draw(
-                        frame,
-                        last_raw_face,
-                        roi_state,
-                        overlay_rgb,
-                        mask_l,
-                        center_lambda=roi_lambda,
-                        size_lambda=size_lambda,
-                        fadeout_lambda=fadeout_lambda,
+                        run_capture_loop(detector, vcam)
+                except RuntimeError as e:
+                    print(
+                        "ERROR: Could not open a virtual camera device. On Linux you "
+                        "typically need the v4l2loopback kernel module, e.g.\n"
+                        "  sudo modprobe v4l2loopback devices=1 video_nr=10 "
+                        "card_label=\"LaughingMan\"\n"
+                        f"Details: {e}",
+                        file=sys.stderr,
                     )
-
-                    rot_angle = (rot_angle + ROT_RESO) % 360
-                    frame_ix += 1
-                    if cv2.waitKey(KEY_WAIT_DELAY_MS) >= 0:
-                        break
-                except KeyboardInterrupt:
-                    print("Interrupted.", file=sys.stderr)
-                    break
+                    raise typer.Exit(code=1) from e
+            else:
+                run_capture_loop(detector, None)
     finally:
         cap.release()
         cv2.destroyAllWindows()
@@ -562,6 +641,37 @@ def main(
         max=1.0,
         help="Per-frame shrink of the box when no face is detected (fade out).",
     ),
+    virtual_cam: bool = typer.Option(
+        False,
+        "--virtual-cam",
+        help=(
+            "Expose the composited video as a virtual webcam (Linux: v4l2loopback) "
+            "so apps like Discord or OBS can capture it. Requires the kernel module; "
+            "see --v4l2-device."
+        ),
+    ),
+    v4l2_device: str | None = typer.Option(
+        None,
+        "--v4l2-device",
+        help=(
+            "Virtual camera device path (e.g. /dev/video10). If omitted, the first "
+            "available v4l2loopback device is used."
+        ),
+    ),
+    virtual_fps: float = typer.Option(
+        30.0,
+        "--virtual-fps",
+        min=0.1,
+        help="Target frame rate for the virtual camera (used with --virtual-cam).",
+    ),
+    no_preview: bool = typer.Option(
+        False,
+        "--no-preview",
+        help=(
+            "Do not open the OpenCV preview window. Use with --virtual-cam to stream "
+            "only to the virtual device (quit with Ctrl+C)."
+        ),
+    ),
 ) -> None:
     """Run the Laughing Man webcam overlay."""
     run_overlay(
@@ -571,6 +681,10 @@ def main(
         roi_lambda=roi_lambda,
         size_lambda=size_lambda,
         fadeout_lambda=fadeout_lambda,
+        virtual_cam=virtual_cam,
+        v4l2_device=v4l2_device,
+        virtual_fps=virtual_fps,
+        show_preview=not no_preview,
     )
 
 

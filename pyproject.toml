@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "mediapipe>=0.10.33",
     "pillow>=12.2.0",
+    "pyvirtualcam>=0.15.0",
     "typer>=0.24.1",
 ]
 
