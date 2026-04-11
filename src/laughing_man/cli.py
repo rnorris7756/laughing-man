@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import typer
 
@@ -47,9 +48,9 @@ def main(
         min=0.0,
         max=1.0,
         help=(
-            "Low-pass on **horizontal** overlay position vs the detector (0 = snap; "
-            "higher = stickier left-right). Vertical placement follows the detector "
-            "each frame. Does not control box size; see --size-lambda."
+            "Low-pass on **horizontal and vertical** overlay position vs the detector "
+            "(0 = snap; higher = less center jitter when sitting still). Does not "
+            "control box size; see --size-lambda."
         ),
     ),
     size_lambda: float = typer.Option(
@@ -131,6 +132,26 @@ def main(
             "with clear margins. Applies to any overlay, including --image."
         ),
     ),
+    face_backend: Literal["blaze", "yunet"] = typer.Option(
+        "blaze",
+        "--face-backend",
+        help=(
+            "Face detector: blaze = MediaPipe BlazeFace (default); yunet = OpenCV "
+            "YuNet ONNX. Run twice with different values to compare jitter. "
+            "See also --full-range (blaze only) and --cascade-margin (yunet only)."
+        ),
+    ),
+    cascade_margin: float = typer.Option(
+        0.0,
+        "--cascade-margin",
+        min=0.0,
+        max=2.0,
+        help=(
+            "YuNet only: expand the previous smoothed face box by this fraction "
+            "per side and run detection on that crop first; fall back to full frame "
+            "if needed. Zero disables. Ignored for blaze (BlazeFace VIDEO mode)."
+        ),
+    ),
 ) -> None:
     """Run the Laughing Man webcam overlay."""
     configure_logging(debug=debug)
@@ -146,6 +167,8 @@ def main(
         show_preview=not no_preview,
         overlay_image=image,
         overlay_scale=overlay_scale,
+        face_backend=face_backend,
+        cascade_margin=cascade_margin,
     )
 
 

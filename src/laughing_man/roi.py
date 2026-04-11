@@ -25,6 +25,35 @@ class RoiState:
     no_face_streak: int = 0
 
 
+def blend_detection_centers(
+    prev_cx: float,
+    prev_cy: float,
+    det_cx: float,
+    det_cy: float,
+    center_lambda: float,
+) -> tuple[float, float]:
+    """
+    Exponential moving average on the 2D box center (horizontal and vertical).
+
+    Parameters
+    ----------
+    prev_cx, prev_cy
+        Center of the previous smoothed ROI.
+    det_cx, det_cy
+        Center of the current raw detection.
+    center_lambda
+        Weight on the previous center; ``(1 - center_lambda)`` on the detection.
+
+    Returns
+    -------
+    tuple[float, float]
+        Blended ``(cx, cy)``.
+    """
+    cx = center_lambda * prev_cx + (1.0 - center_lambda) * det_cx
+    cy = center_lambda * prev_cy + (1.0 - center_lambda) * det_cy
+    return (cx, cy)
+
+
 def clamp_roi(
     x: float,
     y: float,
@@ -125,7 +154,7 @@ def smooth_and_draw(
     frame
         BGR image (modified in place in the face region).
     raw_face
-        Largest face box from BlazeFace this frame, or None if no qualifying face.
+        Largest face box from the active detector this frame, or None if none qualify.
     state
         Tracks the smoothed ROI between frames.
     overlay_rgb
@@ -135,9 +164,8 @@ def smooth_and_draw(
     privacy_effect
         Full-frame treatment when no face is detected (after debounce).
     center_lambda
-        Low-pass on the **horizontal** center of the box only (higher = stickier
-        left-right position). Vertical placement follows the current detection each
-        frame so tuning this does not shift the overlay up or down.
+        Low-pass on the **horizontal and vertical** center of the box (higher =
+        stickier position; reduces per-frame jitter when sitting still).
     size_lambda
         Low-pass on **width and height** (higher = less size jitter from the
         detector; raise above ``center_lambda`` if width/height jitter dominates.
@@ -178,10 +206,13 @@ def smooth_and_draw(
             h_det = h * ROI_SCALER
             new_w = size_lambda * pw + (1.0 - size_lambda) * w_det
             new_h = size_lambda * ph + (1.0 - size_lambda) * h_det
-            roi_cx = center_lambda * (px + pw / 2.0) + (1.0 - center_lambda) * (
-                x + w / 2.0
+            prev_cx = px + pw / 2.0
+            prev_cy = py + ph / 2.0
+            det_cx = float(x) + float(w) / 2.0
+            det_cy = float(y) + float(h) / 2.0
+            roi_cx, roi_cy = blend_detection_centers(
+                prev_cx, prev_cy, det_cx, det_cy, center_lambda
             )
-            roi_cy = float(y) + float(h) / 2.0
             new_x = roi_cx - new_w / 2.0
             new_y = roi_cy - new_h / 2.0 - y_shift
             new_x, new_y, new_w, new_h = clamp_roi(

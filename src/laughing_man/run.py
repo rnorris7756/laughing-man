@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -17,6 +18,7 @@ from PIL import Image, ImageChops, ImageDraw
 from pyvirtualcam import PixelFormat
 
 from laughing_man.camera import open_webcam
+from laughing_man.cascade import CascadedFaceBoxSource
 from laughing_man.constants import (
     CAMERA_INDEX,
     KEY_WAIT_DELAY_MS,
@@ -30,10 +32,17 @@ from laughing_man.detection import (
     BlazeFaceFaceBoxSource,
     face_detector_options,
 )
-from laughing_man.model import ensure_blaze_face_model, resolve_model
+from laughing_man.model import (
+    ensure_blaze_face_model,
+    ensure_yunet_model,
+    resolve_model,
+    resolve_yunet_model,
+)
 from laughing_man.overlay import build_rotated_overlay_frame, load_overlay_images
 from laughing_man.privacy import GaussianBlurPrivacy
+from laughing_man.protocols import FaceBoxSource
 from laughing_man.roi import RoiState, smooth_and_draw
+from laughing_man.yunet_face import YuNetFaceBoxSource, create_yunet_detector
 from laughing_man.tuning import (
     lambda_deltas_from_arrow_key,
     should_quit_preview,
@@ -55,6 +64,8 @@ def run_overlay(
     show_preview: bool,
     overlay_image: Path | None,
     overlay_scale: float,
+    face_backend: Literal["blaze", "yunet"] = "blaze",
+    cascade_margin: float = 0.0,
 ) -> None:
     """
     Run webcam capture with Laughing Man overlay.
@@ -68,8 +79,8 @@ def run_overlay(
         If True, request MediaPipe's TFLite **GPU** delegate (not the same as
         "use CUDA" in PyTorch). Falls back to CPU if creation fails.
     roi_lambda
-        Temporal smoothing for **horizontal** overlay position (0 = snap to raw).
-        Vertical placement follows the detector each frame.
+        Temporal smoothing for **horizontal and vertical** overlay position
+        (0 = snap to raw detection each frame).
     size_lambda
         Temporal smoothing for **box width/height** (reduces detector size jitter).
     no_face_blur_frames
@@ -91,6 +102,10 @@ def run_overlay(
         in ``laughing_man.assets`` (``limg.png`` / ``ltext.png``).
     overlay_scale
         Scale factor for mapping overlay art onto the face ROI (see ``--scale``).
+    face_backend
+        ``blaze`` (MediaPipe BlazeFace) or ``yunet`` (OpenCV YuNet ONNX).
+    cascade_margin
+        YuNet only: crop expansion for cascade detection (see ``--cascade-margin``).
     """
     if not virtual_cam and not show_preview:
         logger.error(
@@ -99,35 +114,6 @@ def run_overlay(
         raise typer.Exit(code=1)
 
     deps = PipelineDeps(privacy=GaussianBlurPrivacy())
-
-    model_path, model_url = resolve_model(full_range)
-    ensure_blaze_face_model(model_path, model_url)
-
-    delegate_label: str
-
-    def create_face_detector() -> vision.FaceDetector:
-        """Open FaceDetector, falling back from GPU to CPU on failure."""
-        nonlocal delegate_label
-        opts = face_detector_options(model_path, use_gpu=use_gpu)
-        try:
-            delegate_label = "GPU" if use_gpu else "CPU"
-            return vision.FaceDetector.create_from_options(opts)
-        except Exception as e:
-            if use_gpu:
-                logger.warning(
-                    "GPU delegate failed ({}: {}); using CPU.",
-                    type(e).__name__,
-                    e,
-                )
-                opts = face_detector_options(model_path, use_gpu=False)
-                try:
-                    delegate_label = "CPU"
-                    return vision.FaceDetector.create_from_options(opts)
-                except Exception as e2:
-                    logger.error("Could not create face detector: {}", e2)
-                    raise typer.Exit(code=1) from e2
-            logger.error("Could not create face detector: {}", e)
-            raise typer.Exit(code=1) from e
 
     cap = open_webcam(CAMERA_INDEX)
 
@@ -161,6 +147,51 @@ def run_overlay(
 
     input_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     input_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+
+    delegate_label: str = "CPU"
+    blaze_model_path: Path | None = None
+    yunet_path: Path | None = None
+
+    if face_backend == "blaze":
+        blaze_model_path, blaze_url = resolve_model(full_range)
+        ensure_blaze_face_model(blaze_model_path, blaze_url)
+
+        def create_face_detector() -> vision.FaceDetector:
+            """Open FaceDetector, falling back from GPU to CPU on failure."""
+            nonlocal delegate_label
+            assert blaze_model_path is not None
+            opts = face_detector_options(blaze_model_path, use_gpu=use_gpu)
+            try:
+                delegate_label = "GPU" if use_gpu else "CPU"
+                return vision.FaceDetector.create_from_options(opts)
+            except Exception as e:
+                if use_gpu:
+                    logger.warning(
+                        "GPU delegate failed ({}: {}); using CPU.",
+                        type(e).__name__,
+                        e,
+                    )
+                    opts = face_detector_options(blaze_model_path, use_gpu=False)
+                    try:
+                        delegate_label = "CPU"
+                        return vision.FaceDetector.create_from_options(opts)
+                    except Exception as e2:
+                        logger.error("Could not create face detector: {}", e2)
+                        raise typer.Exit(code=1) from e2
+                logger.error("Could not create face detector: {}", e)
+                raise typer.Exit(code=1) from e
+
+    elif face_backend == "yunet":
+        if full_range:
+            logger.warning(
+                "--full-range applies to BlazeFace only; ignoring for YuNet."
+            )
+        yunet_path, yunet_url = resolve_yunet_model()
+        ensure_yunet_model(yunet_path, yunet_url)
+    else:
+        logger.error("Unknown face backend: {}", face_backend)
+        raise typer.Exit(code=1)
+
     cap_fps = float(cap.get(cv2.CAP_PROP_FPS))
     stream_fps = virtual_fps if virtual_fps > 0 else (cap_fps if cap_fps > 0 else 30.0)
     min_dim = min(input_h, input_w)
@@ -225,7 +256,7 @@ def run_overlay(
     last_raw_face: tuple[int, int, int, int] | None = None
 
     def run_capture_loop(
-        detector: vision.FaceDetector,
+        face_source: FaceBoxSource,
         vcam: pyvirtualcam.Camera | None,
     ) -> None:
         nonlocal rot_angle, last_raw_face, roi_lambda_live, size_lambda_live
@@ -234,8 +265,6 @@ def run_overlay(
             e = prefill_exc[0]
             logger.error("Rotated overlay pre-computation failed: {}", e)
             raise typer.Exit(code=1) from e
-
-        face_source = BlazeFaceFaceBoxSource(detector)
 
         use_terminal_tuning = stdin_interactive_tuning_available()
         terminal_listener_stop = threading.Event()
@@ -344,43 +373,68 @@ def run_overlay(
             if term_thread is not None:
                 term_thread.join(timeout=2.0)
 
-    try:
-        with create_face_detector() as detector:
-            logger.debug(
-                "TFLite delegate in use: {} (requested {}).",
-                delegate_label,
-                "GPU" if use_gpu else "CPU",
-            )
-            if virtual_cam:
-                try:
-                    with pyvirtualcam.Camera(
-                        width=input_w,
-                        height=input_h,
-                        fps=stream_fps,
-                        fmt=PixelFormat.BGR,
-                        device=v4l2_device,
-                    ) as vcam:
-                        logger.debug(
-                            "Virtual camera: {} ({}), {}x{} @ {:.1f} fps.",
-                            vcam.device,
-                            vcam.backend,
-                            input_w,
-                            input_h,
-                            stream_fps,
-                        )
-                        run_capture_loop(detector, vcam)
-                except RuntimeError as e:
-                    logger.error(
-                        "Could not open a virtual camera device. On Linux you "
-                        "typically need the v4l2loopback kernel module, e.g.\n"
-                        "  sudo modprobe v4l2loopback devices=1 video_nr=10 "
-                        'card_label="LaughingMan"\n'
-                        "Details: {}",
-                        e,
+    def _run_with_face_source(face_src: FaceBoxSource) -> None:
+        if virtual_cam:
+            try:
+                with pyvirtualcam.Camera(
+                    width=input_w,
+                    height=input_h,
+                    fps=stream_fps,
+                    fmt=PixelFormat.BGR,
+                    device=v4l2_device,
+                ) as vcam:
+                    logger.debug(
+                        "Virtual camera: {} ({}), {}x{} @ {:.1f} fps.",
+                        vcam.device,
+                        vcam.backend,
+                        input_w,
+                        input_h,
+                        stream_fps,
                     )
-                    raise typer.Exit(code=1) from e
+                    run_capture_loop(face_src, vcam)
+            except RuntimeError as e:
+                logger.error(
+                    "Could not open a virtual camera device. On Linux you "
+                    "typically need the v4l2loopback kernel module, e.g.\n"
+                    "  sudo modprobe v4l2loopback devices=1 video_nr=10 "
+                    'card_label="LaughingMan"\n'
+                    "Details: {}",
+                    e,
+                )
+                raise typer.Exit(code=1) from e
+        else:
+            run_capture_loop(face_src, None)
+
+    try:
+        if face_backend == "blaze":
+            if cascade_margin > 0:
+                logger.warning(
+                    "--cascade-margin applies to YuNet only; ignoring for BlazeFace."
+                )
+            with create_face_detector() as detector:
+                logger.debug(
+                    "TFLite delegate in use: {} (requested {}).",
+                    delegate_label,
+                    "GPU" if use_gpu else "CPU",
+                )
+                logger.info("Face backend: blaze (MediaPipe BlazeFace)")
+                _run_with_face_source(BlazeFaceFaceBoxSource(detector))
+        else:
+            assert yunet_path is not None
+            yunet_det = create_yunet_detector(yunet_path, input_w, input_h)
+            inner = YuNetFaceBoxSource(yunet_det)
+            if cascade_margin > 0:
+                cascaded: FaceBoxSource = CascadedFaceBoxSource(
+                    inner, cascade_margin, roi_state
+                )
+                logger.info(
+                    "Face backend: yunet (OpenCV YuNet), cascade_margin={:.3f}",
+                    cascade_margin,
+                )
+                _run_with_face_source(cascaded)
             else:
-                run_capture_loop(detector, None)
+                logger.info("Face backend: yunet (OpenCV YuNet)")
+                _run_with_face_source(inner)
     finally:
         cap.release()
         cv2.destroyAllWindows()

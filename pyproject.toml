@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "loguru>=0.7.3",
     "mediapipe>=0.10.33",
+    "opencv-python>=4.13.0.92",
     "pillow>=12.2.0",
     "pyvirtualcam>=0.15.0",
     "typer>=0.24.1",
@@ -26,3 +27,8 @@ packages = ["src/laughing_man"]
 # VideoCapture). Copying avoids incomplete OpenCV installs.
 [tool.uv]
 link-mode = "copy"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

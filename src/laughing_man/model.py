@@ -13,6 +13,8 @@ from laughing_man.constants import (
     BLAZE_FACE_FULL_RANGE_URL,
     BLAZE_FACE_SHORT_RANGE_URL,
     MODEL_ENV,
+    YUNET_MODEL_ENV,
+    YUNET_MODEL_URL,
 )
 
 
@@ -21,6 +23,48 @@ def cache_dir() -> Path:
     base = os.environ.get("XDG_CACHE_HOME", "").strip()
     root = Path(base) if base else Path.home() / ".cache"
     return root / "laughing-man"
+
+
+def default_yunet_model_path() -> Path:
+    """Default cache path for the YuNet ONNX file."""
+    return cache_dir() / "face_detection_yunet_2023mar.onnx"
+
+
+def resolve_yunet_model() -> tuple[Path, str | None]:
+    """
+    Return (path, download_url or None).
+
+    If ``LAUGHING_MAN_YUNET_MODEL`` is set, that path is used and no download URL
+    is applied.
+    """
+    env = os.environ.get(YUNET_MODEL_ENV, "").strip()
+    if env:
+        return Path(env), None
+    return default_yunet_model_path(), YUNET_MODEL_URL
+
+
+def ensure_yunet_model(path: Path, url: str | None) -> None:
+    """Download YuNet ONNX if a URL is known and the file is missing."""
+    if path.exists():
+        return
+    if url is None:
+        logger.error(
+            "YuNet model not found at {} ({} is set; place the .onnx there).",
+            path,
+            YUNET_MODEL_ENV,
+        )
+        raise typer.Exit(code=1)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".partial")
+    logger.info("Downloading YuNet face detector to {} ...", path)
+    try:
+        urllib.request.urlretrieve(url, tmp)
+    except OSError as e:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        logger.error("Could not download YuNet model: {}", e)
+        raise typer.Exit(code=1) from e
+    tmp.replace(path)
 
 
 def default_model_path(full_range: bool) -> Path:
