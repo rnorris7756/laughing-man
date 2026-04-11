@@ -1,11 +1,8 @@
 #
-# laughing-man.py
+# Laughing Man webcam overlay (Ghost in the Shell style).
+# MediaPipe BlazeFace + OpenCV + Pillow.
 #
-# Webcam face detection with Laughing Man overlay (Ghost in the Shell style).
-# Uses MediaPipe BlazeFace for detection (better pose tolerance than Haar cascades),
-# plus OpenCV display and Pillow for the rotating logo composite.
-#
-# Original: pyOpenCV + PIL, Jouni Paulus, 2010.
+# Original face-detection demo: Jouni Paulus, 2010 (pyOpenCV + PIL).
 #
 
 from __future__ import annotations
@@ -20,52 +17,49 @@ from pathlib import Path
 import cv2
 import mediapipe as mp
 import numpy as np
+import typer
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from PIL import Image, ImageChops, ImageDraw
 
-# -----------------------------------------------------------------------------
-# Why not Haar cascades?
-# Haar (e.g. haarcascade_frontalface_alt) matches mostly upright, frontal faces.
-# For webcams, MediaPipe Face Detector (BlazeFace) is a better default: it is
-# CNN-based, runs in real time on CPU, and tolerates moderate head yaw/pitch.
-# Alternatives: YuNet/RetinaFace in OpenCV DNN, or face_landmarker for tracking
-# landmarks (heavier). See: https://ai.google.dev/edge/mediapipe/solutions/vision/face_detector
-# -----------------------------------------------------------------------------
+# Haar cascades are poor for pose; BlazeFace is a better default. See:
+# https://ai.google.dev/edge/mediapipe/solutions/vision/face_detector
 
-# BlazeFace short-range model (typical webcam distance). Cached on first run.
 BLAZE_FACE_SHORT_RANGE_URL = (
     "https://storage.googleapis.com/mediapipe-models/face_detector/"
     "blaze_face_short_range/float16/latest/blaze_face_short_range.tflite"
 )
+BLAZE_FACE_FULL_RANGE_URL = (
+    "https://storage.googleapis.com/mediapipe-models/face_detector/"
+    "blaze_face_full_range/float16/latest/blaze_face_full_range.tflite"
+)
+
 MODEL_ENV = "LAUGHING_MAN_FACE_MODEL"
 
-# Overlay assets: static logo + rotating text plate
 STABLE_IMAGE_NAME = "limg.png"
 ROT_IMAGE_NAME = "ltext.png"
 
-# Ignore very small detections (pixels)
 MIN_FACE_SIZE = (100, 100)
-
-# BlazeFace: confidence for a box to count (lower = more recall, more false positives)
 MIN_DETECTION_CONFIDENCE = 0.45
 MIN_SUPPRESSION_THRESHOLD = 0.3
 
-# Degrees; cache has 360 / ROT_RESO entries
 ROT_RESO = 5
-
-# First-order low-pass on ROI: new = roi_lambda * prev + (1 - roi_lambda) * found
 ROI_LAMBDA = 0.95
-# When face is lost, shrink ROI until it disappears
 FADEOUT_LAMBDA = 0.99
 FADEOUT_LIM = 50
-
-# Expand detected face box slightly
 ROI_SCALER = 1.3
 
 KEY_WAIT_DELAY_MS = 25
 MAIN_WIN_NAME = "Laughing Man (OpenCV)"
 TMP_OFFSET = 0.1
+
+CAMERA_INDEX = 0
+
+app = typer.Typer(
+    help="Webcam Laughing Man face overlay (MediaPipe BlazeFace + OpenCV).",
+    add_completion=False,
+    no_args_is_help=True,
+)
 
 
 @dataclass
@@ -82,28 +76,49 @@ def _cache_dir() -> Path:
     return root / "laughing-man"
 
 
-def _model_path() -> Path:
-    """Path to BlazeFace Tflite; override with LAUGHING_MAN_FACE_MODEL."""
+def _default_model_path(full_range: bool) -> Path:
+    """Default cache path for the bundled BlazeFace variant."""
+    name = (
+        "blaze_face_full_range.tflite" if full_range else "blaze_face_short_range.tflite"
+    )
+    return _cache_dir() / name
+
+
+def _resolve_model(full_range: bool) -> tuple[Path, str | None]:
+    """
+    Return (path, download_url or None).
+
+    If ``LAUGHING_MAN_FACE_MODEL`` is set, that path is used and no download URL
+    is applied (the file must already exist).
+    """
     env = os.environ.get(MODEL_ENV, "").strip()
     if env:
-        return Path(env)
-    return _cache_dir() / "blaze_face_short_range.tflite"
+        return Path(env), None
+    url = BLAZE_FACE_FULL_RANGE_URL if full_range else BLAZE_FACE_SHORT_RANGE_URL
+    return _default_model_path(full_range), url
 
 
-def _ensure_blaze_face_model(path: Path) -> None:
-    """Download BlazeFace if missing."""
+def _ensure_blaze_face_model(path: Path, url: str | None) -> None:
+    """Download BlazeFace if a URL is known and the file is missing."""
     if path.exists():
         return
+    if url is None:
+        print(
+            f"ERROR: Face model not found at {path} "
+            f"({MODEL_ENV} is set; place a .tflite there).",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".partial")
     print(f"Downloading face detector model to {path} ...", file=sys.stderr)
     try:
-        urllib.request.urlretrieve(BLAZE_FACE_SHORT_RANGE_URL, tmp)
+        urllib.request.urlretrieve(url, tmp)
     except OSError as e:
         if tmp.exists():
             tmp.unlink(missing_ok=True)
         print(f"ERROR: Could not download model: {e}", file=sys.stderr)
-        sys.exit(1)
+        raise typer.Exit(code=1) from e
     tmp.replace(path)
 
 
@@ -247,10 +262,18 @@ def detect_and_draw(
     cv2.imshow(MAIN_WIN_NAME, frame)
 
 
-def main() -> None:
-    """Run webcam capture with Laughing Man overlay."""
-    model_path = _model_path()
-    _ensure_blaze_face_model(model_path)
+def run_overlay(*, full_range: bool) -> None:
+    """
+    Run webcam capture with Laughing Man overlay.
+
+    Parameters
+    ----------
+    full_range
+        If True, use BlazeFace full-range (smaller/distant faces). Otherwise
+        short-range (typical desk webcam).
+    """
+    model_path, model_url = _resolve_model(full_range)
+    _ensure_blaze_face_model(model_path, model_url)
 
     base_options = python.BaseOptions(model_asset_path=str(model_path))
     options = vision.FaceDetectorOptions(
@@ -260,10 +283,10 @@ def main() -> None:
         min_suppression_threshold=MIN_SUPPRESSION_THRESHOLD,
     )
 
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
-        print("ERROR: Could not open camera 0", file=sys.stderr)
-        sys.exit(1)
+        print(f"ERROR: Could not open camera {CAMERA_INDEX}", file=sys.stderr)
+        raise typer.Exit(code=1)
 
     cv2.namedWindow(MAIN_WIN_NAME, cv2.WINDOW_AUTOSIZE)
 
@@ -303,62 +326,81 @@ def main() -> None:
     roi_state = RoiState()
     t0 = time.monotonic()
 
-    print("Press any key in the window to quit.")
+    print("Press any key in the window to quit, or Ctrl+C to exit.", file=sys.stderr)
 
     try:
         with vision.FaceDetector.create_from_options(options) as detector:
             while True:
-                ok, frame = cap.read()
-                if not ok or frame is None or frame.size == 0:
-                    break
+                try:
+                    ok, frame = cap.read()
+                    if not ok or frame is None or frame.size == 0:
+                        break
 
-                timestamp_ms = int((time.monotonic() - t0) * 1000.0)
+                    timestamp_ms = int((time.monotonic() - t0) * 1000.0)
 
-                cache_idx = rot_angle // ROT_RESO
-                if not img_cache[cache_idx]:
-                    print(f"Computing rotated overlay for angle {rot_angle}°.")
-                    comb_img = Image.new("RGB", st_img.size)
-                    draw_img = ImageDraw.Draw(comb_img)
-                    draw_img.ellipse(
-                        (
-                            im_sz[0] * TMP_OFFSET,
-                            im_sz[1] * TMP_OFFSET,
-                            im_sz[0] * (1 - TMP_OFFSET),
-                            im_sz[1] * (1 - TMP_OFFSET),
-                        ),
-                        fill="white",
+                    cache_idx = rot_angle // ROT_RESO
+                    if not img_cache[cache_idx]:
+                        print(f"Computing rotated overlay for angle {rot_angle}°.")
+                        comb_img = Image.new("RGB", st_img.size)
+                        draw_img = ImageDraw.Draw(comb_img)
+                        draw_img.ellipse(
+                            (
+                                im_sz[0] * TMP_OFFSET,
+                                im_sz[1] * TMP_OFFSET,
+                                im_sz[0] * (1 - TMP_OFFSET),
+                                im_sz[1] * (1 - TMP_OFFSET),
+                            ),
+                            fill="white",
+                        )
+                        rot_nearest = rot_img.rotate(rot_angle, Image.Resampling.NEAREST)
+                        rot_a_nearest = rot_alpha.rotate(rot_angle, Image.Resampling.NEAREST)
+                        tmp_img = Image.composite(
+                            st_img,
+                            Image.composite(rot_nearest, comb_img, rot_a_nearest),
+                            st_alpha,
+                        )
+                        tmp_img = tmp_img.resize((min_dim, min_dim))
+                        img_cache[cache_idx].append(tmp_img)
+                    else:
+                        tmp_img = img_cache[cache_idx][0]
+
+                    overlay_rgb = np.asarray(tmp_img.convert("RGB"))
+                    mask_l = np.asarray(mask_img)
+
+                    detect_and_draw(
+                        frame,
+                        detector,
+                        timestamp_ms,
+                        overlay_rgb,
+                        mask_l,
+                        roi_state,
                     )
-                    rot_nearest = rot_img.rotate(rot_angle, Image.Resampling.NEAREST)
-                    rot_a_nearest = rot_alpha.rotate(rot_angle, Image.Resampling.NEAREST)
-                    tmp_img = Image.composite(
-                        st_img,
-                        Image.composite(rot_nearest, comb_img, rot_a_nearest),
-                        st_alpha,
-                    )
-                    tmp_img = tmp_img.resize((min_dim, min_dim))
-                    img_cache[cache_idx].append(tmp_img)
-                else:
-                    tmp_img = img_cache[cache_idx][0]
 
-                overlay_rgb = np.asarray(tmp_img.convert("RGB"))
-                mask_l = np.asarray(mask_img)
-
-                detect_and_draw(
-                    frame,
-                    detector,
-                    timestamp_ms,
-                    overlay_rgb,
-                    mask_l,
-                    roi_state,
-                )
-
-                rot_angle = (rot_angle + ROT_RESO) % 360
-                if cv2.waitKey(KEY_WAIT_DELAY_MS) >= 0:
+                    rot_angle = (rot_angle + ROT_RESO) % 360
+                    if cv2.waitKey(KEY_WAIT_DELAY_MS) >= 0:
+                        break
+                except KeyboardInterrupt:
+                    print("Interrupted.", file=sys.stderr)
                     break
     finally:
         cap.release()
         cv2.destroyAllWindows()
 
 
+@app.command()
+def main(
+    full_range: bool = typer.Option(
+        False,
+        "--full-range",
+        help=(
+            "Use BlazeFace full-range model (better for faces that are small "
+            "or far from the camera). Default is short-range (typical desk webcam)."
+        ),
+    ),
+) -> None:
+    """Run the Laughing Man webcam overlay."""
+    run_overlay(full_range=full_range)
+
+
 if __name__ == "__main__":
-    main()
+    app()
