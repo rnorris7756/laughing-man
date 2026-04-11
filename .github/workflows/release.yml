@@ -36,17 +36,33 @@ jobs:
         run: uv sync --group dev --python 3.12
 
       - name: Bump version, changelog, and tag
-        run: uv run cz bump --yes --changelog --no-verify
+        id: bump
+        run: |
+          set +e
+          uv run cz bump --yes --changelog --no-verify
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+          elif [ "$code" -eq 3 ]; then
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            echo "No conventional commits to release; skipping build and push."
+          else
+            exit "$code"
+          fi
 
       - name: Build sdist and wheel
+        if: steps.bump.outputs.bumped == 'true'
         run: uv build
 
       - name: Push release commit and tag
+        if: steps.bump.outputs.bumped == 'true'
         run: |
           git push origin "HEAD:${{ github.ref_name }}"
           git push origin --tags
 
       - name: Upload build artifacts
+        if: steps.bump.outputs.bumped == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: dist
