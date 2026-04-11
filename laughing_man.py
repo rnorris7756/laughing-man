@@ -8,17 +8,21 @@
 from __future__ import annotations
 
 import os
+import select
 import sys
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import cv2
 import mediapipe as mp
 import numpy as np
 import pyvirtualcam
 import typer
+from loguru import logger
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from PIL import Image, ImageChops, ImageDraw
@@ -46,18 +50,121 @@ MIN_DETECTION_CONFIDENCE = 0.45
 MIN_SUPPRESSION_THRESHOLD = 0.3
 
 ROT_RESO = 5
-DEFAULT_ROI_LAMBDA = 0.35
-# Stronger low-pass on w/h than on center: bbox size jitters more than real head size.
-DEFAULT_SIZE_LAMBDA = 0.65
-DEFAULT_FADEOUT_LAMBDA = 0.99
+DEFAULT_ROI_LAMBDA = 0.55
+DEFAULT_SIZE_LAMBDA = 0.55
 FADEOUT_LIM = 50
-ROI_SCALER = 1.3
+# Full-frame privacy blur at fade strength 1.0 (Gaussian sigma, px).
+PRIVACY_BLUR_MAX_SIGMA = 28.0
+# Consecutive no-face frames required before privacy blur (debounce detector flicker).
+DEFAULT_NO_FACE_BLUR_FRAMES = 3
+# Face box → overlay scale (1.3 baseline × 1.08).
+ROI_SCALER = 1.3 * 1.08
+# Shift overlay up by this fraction of **detector** face height (y grows downward).
+OVERLAY_VERTICAL_SHIFT = 0.10
 
 KEY_WAIT_DELAY_MS = 25
 MAIN_WIN_NAME = "Laughing Man (OpenCV)"
 TMP_OFFSET = 0.1
+# Step for interactive --roi-lambda / --size-lambda tuning (terminal or preview arrows).
+LAMBDA_TUNE_STEP = 0.05
+# waitKeyEx codes for arrow keys: GTK/Qt (Linux, macOS) and common Windows highgui values.
+_ARROW_KEYS_ROI_UP = frozenset({65362, 2490368})
+_ARROW_KEYS_ROI_DOWN = frozenset({65364, 2621440})
+_ARROW_KEYS_SIZE_LEFT = frozenset({65361, 2424832})
+_ARROW_KEYS_SIZE_RIGHT = frozenset({65363, 2555904})
+# Preview window quit chords delivered as key events (see ``_should_quit_preview``).
+_QUIT_PREVIEW_KEY_CODES = frozenset(
+    {
+        3,  # Ctrl+C (ETX) when the preview window has focus (terminal Ctrl+C uses SIGINT)
+        17,  # Ctrl+Q (ASCII control-Q; common on GTK/X11 and Windows highgui)
+    }
+)
 
 CAMERA_INDEX = 0
+
+
+def _configure_logging(*, debug: bool) -> None:
+    """
+    Configure loguru: single stderr sink, INFO unless ``debug`` is True.
+
+    Parameters
+    ----------
+    debug
+        If True, emit DEBUG-level messages (e.g. overlay prefill diagnostics).
+    """
+    logger.remove()
+    logger.add(sys.stderr, level="DEBUG" if debug else "INFO")
+
+
+def _open_webcam(camera_index: int) -> cv2.VideoCapture:
+    """
+    Open a camera by index.
+
+    Temporarily silences OpenCV's verbose FFmpeg/backend logging on failure so
+    the process can exit with a single clear message instead of a multi-line
+    OpenCV stack trace.
+
+    Parameters
+    ----------
+    camera_index
+        ``VideoCapture`` device index (typically ``0`` for the default webcam).
+
+    Returns
+    -------
+    cv2.VideoCapture
+        An opened capture device.
+
+    Raises
+    ------
+    typer.Exit
+        If the device cannot be opened.
+    """
+    prev_level = cv2.utils.logging.getLogLevel()
+    cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
+    try:
+        try:
+            cap = cv2.VideoCapture(camera_index)
+        except Exception as e:
+            logger.error(_camera_open_failed_message(camera_index, detail=str(e)))
+            raise typer.Exit(code=1) from e
+    finally:
+        cv2.utils.logging.setLogLevel(prev_level)
+
+    if not cap.isOpened():
+        logger.error(_camera_open_failed_message(camera_index))
+        raise typer.Exit(code=1)
+    return cap
+
+
+def _camera_open_failed_message(camera_index: int, detail: str | None = None) -> str:
+    """
+    Build a user-facing message when the webcam cannot be opened.
+
+    Parameters
+    ----------
+    camera_index
+        Index that was passed to ``VideoCapture``.
+    detail
+        Optional exception text from OpenCV (shown on one line when present).
+
+    Returns
+    -------
+    str
+        Full message for stderr.
+    """
+    lines = [
+        f"ERROR: Could not open the webcam (camera index {camera_index}).",
+        "",
+        "No usable video capture device was found at that index. Typical causes:",
+        "  • No camera is connected, or the wrong device index was chosen.",
+        "  • Another application is using the camera; close it and try again.",
+        "  • On Linux, you may need permission to access /dev/video* (e.g. be in the "
+        '"video" group, or adjust permissions).',
+    ]
+    if detail:
+        lines.extend(["", f"Technical detail: {detail}"])
+    return "\n".join(lines)
+
 
 app = typer.Typer(
     help="Webcam Laughing Man face overlay (MediaPipe BlazeFace + OpenCV).",
@@ -71,6 +178,8 @@ class RoiState:
     """Smoothed face bounding box in float coordinates."""
 
     prev: tuple[float, float, float, float] | None = None
+    last_face_h: float | None = None
+    no_face_streak: int = 0
 
 
 def _cache_dir() -> Path:
@@ -107,21 +216,21 @@ def _ensure_blaze_face_model(path: Path, url: str | None) -> None:
     if path.exists():
         return
     if url is None:
-        print(
-            f"ERROR: Face model not found at {path} "
-            f"({MODEL_ENV} is set; place a .tflite there).",
-            file=sys.stderr,
+        logger.error(
+            "Face model not found at {} ({} is set; place a .tflite there).",
+            path,
+            MODEL_ENV,
         )
         raise typer.Exit(code=1)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".partial")
-    print(f"Downloading face detector model to {path} ...", file=sys.stderr)
+    logger.info("Downloading face detector model to {} ...", path)
     try:
         urllib.request.urlretrieve(url, tmp)
     except OSError as e:
         if tmp.exists():
             tmp.unlink(missing_ok=True)
-        print(f"ERROR: Could not download model: {e}", file=sys.stderr)
+        logger.error("Could not download model: {}", e)
         raise typer.Exit(code=1) from e
     tmp.replace(path)
 
@@ -175,6 +284,191 @@ def mediapipe_detect_face(
     return _pick_largest_face(list(result.detections), min_w, min_h)
 
 
+def _lambda_deltas_from_arrow_key(key: int) -> tuple[float, float] | None:
+    """
+    Map an OpenCV ``waitKeyEx`` code to tuning deltas for roi-lambda and size-lambda.
+
+    Up/down adjust roi-lambda; left/right adjust size-lambda. Returns ``None`` if
+    ``key`` is not a recognized arrow code.
+
+    Parameters
+    ----------
+    key
+        Value from :func:`cv2.waitKeyEx` (non-negative when a key was pressed).
+
+    Returns
+    -------
+    tuple[float, float] | None
+        ``(delta_roi_lambda, delta_size_lambda)``, each 0 if that axis does not
+        apply, or ``None`` if ``key`` is not an arrow.
+    """
+    if key in _ARROW_KEYS_ROI_UP:
+        return (LAMBDA_TUNE_STEP, 0.0)
+    if key in _ARROW_KEYS_ROI_DOWN:
+        return (-LAMBDA_TUNE_STEP, 0.0)
+    if key in _ARROW_KEYS_SIZE_LEFT:
+        return (0.0, -LAMBDA_TUNE_STEP)
+    if key in _ARROW_KEYS_SIZE_RIGHT:
+        return (0.0, LAMBDA_TUNE_STEP)
+    return None
+
+
+def _stdin_interactive_tuning_available() -> bool:
+    """
+    Return True if arrow / quit tuning can be read from the controlling terminal.
+
+    Requires an interactive TTY on stdin and a supported platform API
+    (POSIX ``termios`` or Windows ``msvcrt``).
+    """
+    if not sys.stdin.isatty():
+        return False
+    if sys.platform == "win32":
+        return True
+    try:
+        import termios  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _terminal_stdin_tune_loop(
+    listener_stop: threading.Event,
+    user_quit: threading.Event,
+    apply_deltas: Callable[[float, float], None],
+) -> None:
+    """
+    Background loop: read arrow keys and Ctrl+Q from the terminal.
+
+    Parameters
+    ----------
+    listener_stop
+        When set, exit the loop and return (main loop is shutting down).
+    user_quit
+        Set when the user presses Ctrl+Q (ASCII DC1) in the terminal reader.
+    apply_deltas
+        ``(delta_roi_lambda, delta_size_lambda)`` — same semantics as
+        :func:`_lambda_deltas_from_arrow_key` results.
+    """
+    try:
+        if sys.platform == "win32":
+            _windows_console_tune_loop(listener_stop, user_quit, apply_deltas)
+        else:
+            _posix_stdin_tune_loop(listener_stop, user_quit, apply_deltas)
+    except Exception as e:
+        logger.warning("Terminal key listener stopped ({}).", e)
+
+
+def _posix_stdin_tune_loop(
+    listener_stop: threading.Event,
+    user_quit: threading.Event,
+    apply_deltas: Callable[[float, float], None],
+) -> None:
+    """POSIX ``termios`` cbreak reader for CSI/SS3 arrows and Ctrl+Q."""
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while not listener_stop.is_set():
+            r, _, _ = select.select([sys.stdin], [], [], 0.12)
+            if not r:
+                continue
+            b0 = os.read(fd, 1)
+            if not b0:
+                break
+            if b0 == b"\x1b":
+                r2, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if not r2:
+                    continue
+                b1 = os.read(fd, 1)
+                if b1 == b"[":
+                    r3, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    if not r3:
+                        continue
+                    b2 = os.read(fd, 1)
+                    if b2 == b"A":
+                        apply_deltas(LAMBDA_TUNE_STEP, 0.0)
+                    elif b2 == b"B":
+                        apply_deltas(-LAMBDA_TUNE_STEP, 0.0)
+                    elif b2 == b"C":
+                        apply_deltas(0.0, LAMBDA_TUNE_STEP)
+                    elif b2 == b"D":
+                        apply_deltas(0.0, -LAMBDA_TUNE_STEP)
+                elif b1 == b"O":
+                    r3, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    if not r3:
+                        continue
+                    b2 = os.read(fd, 1)
+                    if b2 == b"A":
+                        apply_deltas(LAMBDA_TUNE_STEP, 0.0)
+                    elif b2 == b"B":
+                        apply_deltas(-LAMBDA_TUNE_STEP, 0.0)
+                    elif b2 == b"C":
+                        apply_deltas(0.0, LAMBDA_TUNE_STEP)
+                    elif b2 == b"D":
+                        apply_deltas(0.0, -LAMBDA_TUNE_STEP)
+                continue
+            if b0 == b"\x11":
+                user_quit.set()
+                return
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _windows_console_tune_loop(
+    listener_stop: threading.Event,
+    user_quit: threading.Event,
+    apply_deltas: Callable[[float, float], None],
+) -> None:
+    """Windows console: extended-prefix arrow keys and Ctrl+Q."""
+    import msvcrt
+
+    while not listener_stop.is_set():
+        if msvcrt.kbhit():
+            c = msvcrt.getch()
+            if c in (b"\xe0", b"\x00"):
+                c2 = msvcrt.getch()
+                if c2 == b"H":
+                    apply_deltas(LAMBDA_TUNE_STEP, 0.0)
+                elif c2 == b"P":
+                    apply_deltas(-LAMBDA_TUNE_STEP, 0.0)
+                elif c2 == b"K":
+                    apply_deltas(0.0, -LAMBDA_TUNE_STEP)
+                elif c2 == b"M":
+                    apply_deltas(0.0, LAMBDA_TUNE_STEP)
+            elif c == b"\x11":
+                user_quit.set()
+                return
+        else:
+            listener_stop.wait(0.05)
+
+
+def _should_quit_preview(key: int) -> bool:
+    """
+    Return True if this OpenCV ``waitKeyEx`` code should exit the preview loop.
+
+    Handles Ctrl+C and Ctrl+Q as control-character key events when the preview
+    window has focus (ASCII 3 and 17). When the terminal has focus, Ctrl+C
+    still stops the process via ``KeyboardInterrupt``. Cmd+Q on macOS depends
+    on the OpenCV GUI backend and may not be reported as a distinct code; use
+    Ctrl+Q or terminal Ctrl+C if needed. Other keys are ignored unless handled
+    elsewhere (e.g. arrow tuning).
+
+    Parameters
+    ----------
+    key
+        Value from :func:`cv2.waitKeyEx`, or ``-1`` if no key was pressed.
+
+    Returns
+    -------
+    bool
+        True if the user chose to quit from the preview window.
+    """
+    return key >= 0 and key in _QUIT_PREVIEW_KEY_CODES
+
+
 def _clamp_roi(
     x: float,
     y: float,
@@ -197,6 +491,23 @@ def _clamp_roi(
     return (x, y, w, h)
 
 
+def _apply_privacy_blur(frame: np.ndarray, amount: float) -> None:
+    """
+    Blend ``frame`` toward a heavily Gaussian-blurred copy (full-frame privacy).
+
+    Parameters
+    ----------
+    frame
+        BGR uint8 image, updated in place.
+    amount
+        Blend weight for the blurred layer in ``[0, 1]`` (0 = unchanged, 1 = full blur).
+    """
+    if amount <= 1e-6:
+        return
+    blurred = cv2.GaussianBlur(frame, (0, 0), PRIVACY_BLUR_MAX_SIGMA)
+    cv2.addWeighted(frame, 1.0 - amount, blurred, amount, 0, dst=frame)
+
+
 def smooth_and_draw(
     frame: np.ndarray,
     raw_face: tuple[int, int, int, int] | None,
@@ -206,18 +517,20 @@ def smooth_and_draw(
     *,
     center_lambda: float,
     size_lambda: float,
-    fadeout_lambda: float,
+    no_face_blur_frames: int,
     show_preview: bool,
 ) -> None:
     """
-    Apply temporal smoothing to the face box, then alpha-composite the overlay.
+    Apply full-frame privacy blur after consecutive no-face frames, temporal
+    smoothing to the face box when a face is present, then alpha-composite the
+    overlay on the face (or on the last known box during the debounce window).
 
     Parameters
     ----------
     frame
         BGR image (modified in place in the face region).
     raw_face
-        New detection for this logical frame, or None if none / skipped.
+        Largest face box from BlazeFace this frame, or None if no qualifying face.
     state
         Tracks the smoothed ROI between frames.
     overlay_rgb
@@ -225,40 +538,39 @@ def smooth_and_draw(
     mask_l
         Single-channel uint8 mask (0–255), same spatial size as ``overlay_rgb``.
     center_lambda
-        Low-pass on the **center** of the box (higher = stickier position).
+        Low-pass on the **horizontal** center of the box only (higher = stickier
+        left-right position). Vertical placement follows the current detection each
+        frame so tuning this does not shift the overlay up or down.
     size_lambda
         Low-pass on **width and height** (higher = less size jitter from the
-        detector; use greater than ``center_lambda`` when the box size flickers).
-    fadeout_lambda
-        Shrink factor per frame when no face is seen.
+        detector; raise above ``center_lambda`` if width/height jitter dominates.
+    no_face_blur_frames
+        Require this many consecutive frames with no face before applying privacy
+        blur; until then the last smoothed overlay position is held fixed.
     show_preview
         If True, show frames in an OpenCV window.
     """
     frame_h, frame_w = frame.shape[:2]
 
+    if raw_face is not None:
+        state.no_face_streak = 0
+    else:
+        state.no_face_streak += 1
+
+    apply_blur = state.no_face_streak >= no_face_blur_frames
+    _apply_privacy_blur(frame, 1.0 if apply_blur else 0.0)
+
     r: tuple[int, int, int, int] | None = None
 
-    if raw_face is None:
-        if state.prev is not None:
-            px, py, pw, ph = state.prev
-            roi_cx = px + pw / 2.0
-            roi_cy = py + ph / 2.0
-            new_w = fadeout_lambda * pw
-            new_h = fadeout_lambda * ph
-            new_x = roi_cx - new_w / 2.0
-            new_y = roi_cy - new_h / 2.0
-            state.prev = (new_x, new_y, new_w, new_h)
-            ix, iy = int(round(new_x)), int(round(new_y))
-            iw, ih = int(round(new_w)), int(round(new_h))
-            if iw < FADEOUT_LIM or ih < FADEOUT_LIM:
-                state.prev = None
-            else:
-                r = (ix, iy, iw, ih)
-    else:
+    if raw_face is not None:
         x, y, w, h = raw_face
+        face_h = float(h)
+        state.last_face_h = face_h
+        y_shift = OVERLAY_VERTICAL_SHIFT * face_h
         if state.prev is None:
-            state.prev = (float(x), float(y), float(w), float(h))
-            r = (x, y, w, h)
+            sy = float(y) - y_shift
+            state.prev = (float(x), sy, float(w), float(h))
+            r = (x, int(round(sy)), w, h)
         else:
             px, py, pw, ph = state.prev
             w_det = w * ROI_SCALER
@@ -268,11 +580,9 @@ def smooth_and_draw(
             roi_cx = center_lambda * (px + pw / 2.0) + (1.0 - center_lambda) * (
                 x + w / 2.0
             )
-            roi_cy = center_lambda * (py + ph / 2.0) + (1.0 - center_lambda) * (
-                y + h / 2.0
-            )
+            roi_cy = float(y) + float(h) / 2.0
             new_x = roi_cx - new_w / 2.0
-            new_y = roi_cy - new_h / 2.0
+            new_y = roi_cy - new_h / 2.0 - y_shift
             new_x, new_y, new_w, new_h = _clamp_roi(
                 new_x, new_y, new_w, new_h, frame_w, frame_h
             )
@@ -281,8 +591,17 @@ def smooth_and_draw(
             iw, ih = int(round(new_w)), int(round(new_h))
             if iw < FADEOUT_LIM or ih < FADEOUT_LIM:
                 state.prev = None
+                state.last_face_h = None
             else:
                 r = (ix, iy, iw, ih)
+
+    elif not apply_blur and state.prev is not None:
+        px, py, pw, ph = state.prev
+        new_x, new_y, new_w, new_h = _clamp_roi(px, py, pw, ph, frame_w, frame_h)
+        ix, iy = int(round(new_x)), int(round(new_y))
+        iw, ih = int(round(new_w)), int(round(new_h))
+        if iw >= FADEOUT_LIM and ih >= FADEOUT_LIM:
+            r = (ix, iy, iw, ih)
 
     if r is None:
         if show_preview:
@@ -296,8 +615,9 @@ def smooth_and_draw(
             cv2.imshow(MAIN_WIN_NAME, frame)
         return
 
-    ov = cv2.resize(overlay_rgb, (rw, rh), interpolation=cv2.INTER_LINEAR)
-    mk = cv2.resize(mask_l, (rw, rh), interpolation=cv2.INTER_LINEAR)
+    ah, aw = face_roi.shape[:2]
+    ov = cv2.resize(overlay_rgb, (aw, ah), interpolation=cv2.INTER_LINEAR)
+    mk = cv2.resize(mask_l, (aw, ah), interpolation=cv2.INTER_LINEAR)
 
     overlay_bgr = cv2.cvtColor(ov, cv2.COLOR_RGB2BGR).astype(np.float32)
     mask_f = (mk.astype(np.float32) / 255.0)[..., np.newaxis]
@@ -330,14 +650,66 @@ def _face_detector_options(
     )
 
 
+def _build_rotated_overlay_frame(
+    *,
+    rot_angle: int,
+    st_img: Image.Image,
+    st_alpha: Image.Image,
+    rot_img: Image.Image,
+    rot_alpha: Image.Image,
+    im_sz: tuple[int, int],
+    tmp_offset: float,
+    min_dim: int,
+) -> Image.Image:
+    """
+    Composite stable art, rotating text, and masks; resize to the square ROI size.
+
+    Parameters
+    ----------
+    rot_angle
+        Rotation in degrees (typically a multiple of ``ROT_RESO``).
+    st_img, st_alpha, rot_img, rot_alpha
+        Source layers (``st_*`` static, ``rot_*`` rotated each frame).
+    im_sz
+        ``(width, height)`` of ``st_img``.
+    tmp_offset
+        Ellipse inset factor (same as ``TMP_OFFSET``).
+    min_dim
+        Edge length of the square overlay after resize.
+
+    Returns
+    -------
+    Image.Image
+        RGB ``Image`` ready for ``numpy.asarray(..., dtype=uint8)`` in the loop.
+    """
+    comb_img = Image.new("RGB", st_img.size)
+    draw_img = ImageDraw.Draw(comb_img)
+    draw_img.ellipse(
+        (
+            im_sz[0] * tmp_offset,
+            im_sz[1] * tmp_offset,
+            im_sz[0] * (1 - tmp_offset),
+            im_sz[1] * (1 - tmp_offset),
+        ),
+        fill="white",
+    )
+    rot_nearest = rot_img.rotate(rot_angle, Image.Resampling.NEAREST)
+    rot_a_nearest = rot_alpha.rotate(rot_angle, Image.Resampling.NEAREST)
+    tmp_img = Image.composite(
+        st_img,
+        Image.composite(rot_nearest, comb_img, rot_a_nearest),
+        st_alpha,
+    )
+    return tmp_img.resize((min_dim, min_dim))
+
+
 def run_overlay(
     *,
     full_range: bool,
     use_gpu: bool,
-    detect_interval: int,
     roi_lambda: float,
     size_lambda: float,
-    fadeout_lambda: float,
+    no_face_blur_frames: int,
     virtual_cam: bool,
     v4l2_device: str | None,
     virtual_fps: float,
@@ -354,16 +726,13 @@ def run_overlay(
     use_gpu
         If True, request MediaPipe's TFLite **GPU** delegate (not the same as
         "use CUDA" in PyTorch). Falls back to CPU if creation fails.
-    detect_interval
-        Run BlazeFace every N frames (1 = every frame). Values greater than 1
-        reduce CPU/GPU load but reuse the last detection between runs, which
-        can increase perceived lag.
     roi_lambda
-        Temporal smoothing for the **center** of the overlay (0 = snap to raw).
+        Temporal smoothing for **horizontal** overlay position (0 = snap to raw).
+        Vertical placement follows the detector each frame.
     size_lambda
         Temporal smoothing for **box width/height** (reduces detector size jitter).
-    fadeout_lambda
-        Shrink rate for the box when the face is lost.
+    no_face_blur_frames
+        Consecutive no-face frames before privacy blur; debounces flicker.
     virtual_cam
         If True, send composited frames to a virtual camera (Linux: v4l2loopback;
         Windows/macOS: OBS Virtual Camera when available) so other apps can
@@ -378,9 +747,8 @@ def run_overlay(
         when streaming only to the virtual device.
     """
     if not virtual_cam and not show_preview:
-        print(
-            "ERROR: Need at least one of --virtual-cam or preview (omit --no-preview).",
-            file=sys.stderr,
+        logger.error(
+            "Need at least one of --virtual-cam or preview (omit --no-preview)."
         )
         raise typer.Exit(code=1)
 
@@ -398,27 +766,22 @@ def run_overlay(
             return vision.FaceDetector.create_from_options(opts)
         except Exception as e:
             if use_gpu:
-                print(
-                    f"GPU delegate failed ({type(e).__name__}: {e}); using CPU.",
-                    file=sys.stderr,
+                logger.warning(
+                    "GPU delegate failed ({}: {}); using CPU.",
+                    type(e).__name__,
+                    e,
                 )
                 opts = _face_detector_options(model_path, use_gpu=False)
                 try:
                     delegate_label = "CPU"
                     return vision.FaceDetector.create_from_options(opts)
                 except Exception as e2:
-                    print(
-                        f"ERROR: Could not create face detector: {e2}",
-                        file=sys.stderr,
-                    )
+                    logger.error("Could not create face detector: {}", e2)
                     raise typer.Exit(code=1) from e2
-            print(f"ERROR: Could not create face detector: {e}", file=sys.stderr)
+            logger.error("Could not create face detector: {}", e)
             raise typer.Exit(code=1) from e
 
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    if not cap.isOpened():
-        print(f"ERROR: Could not open camera {CAMERA_INDEX}", file=sys.stderr)
-        raise typer.Exit(code=1)
+    cap = _open_webcam(CAMERA_INDEX)
 
     if show_preview:
         cv2.namedWindow(MAIN_WIN_NAME, cv2.WINDOW_AUTOSIZE)
@@ -458,98 +821,169 @@ def run_overlay(
     n_cache = 360 // ROT_RESO
     img_cache: list[list[Image.Image]] = [[] for _ in range(n_cache)]
 
-    roi_state = RoiState()
-    t0 = time.monotonic()
-    frame_ix = 0
-    last_raw_face: tuple[int, int, int, int] | None = None
+    prefill_exc: list[BaseException] = []
 
-    if show_preview:
-        print(
-            "Press any key in the preview window to quit, or Ctrl+C to exit.",
-            file=sys.stderr,
-        )
-    elif virtual_cam:
-        print("Streaming to virtual camera; press Ctrl+C to exit.", file=sys.stderr)
+    def _prefill_rotated_overlay_cache() -> None:
+        """Fill ``img_cache`` for all discrete rotation steps (runs in a helper thread)."""
+        try:
+            for i in range(n_cache):
+                angle = i * ROT_RESO
+                img_cache[i].append(
+                    _build_rotated_overlay_frame(
+                        rot_angle=angle,
+                        st_img=st_img,
+                        st_alpha=st_alpha,
+                        rot_img=rot_img,
+                        rot_alpha=rot_alpha,
+                        im_sz=im_sz,
+                        tmp_offset=TMP_OFFSET,
+                        min_dim=min_dim,
+                    )
+                )
+        except BaseException as e:
+            prefill_exc.append(e)
+
+    prefill_thread = threading.Thread(
+        target=_prefill_rotated_overlay_cache,
+        name="LaughingManRotOverlayPrefill",
+        daemon=True,
+    )
+    logger.debug(
+        "Pre-computing {} rotated overlay steps in the background ...",
+        n_cache,
+    )
+    prefill_thread.start()
+
+    roi_state = RoiState()
+    roi_lambda_live = roi_lambda
+    size_lambda_live = size_lambda
+    t0 = time.monotonic()
+    last_raw_face: tuple[int, int, int, int] | None = None
 
     def run_capture_loop(
         detector: vision.FaceDetector,
         vcam: pyvirtualcam.Camera | None,
     ) -> None:
-        nonlocal rot_angle, frame_ix, last_raw_face
-        while True:
-            try:
-                ok, frame = cap.read()
-                if not ok or frame is None or frame.size == 0:
-                    break
+        nonlocal rot_angle, last_raw_face, roi_lambda_live, size_lambda_live
+        prefill_thread.join()
+        if prefill_exc:
+            e = prefill_exc[0]
+            logger.error("Rotated overlay pre-computation failed: {}", e)
+            raise typer.Exit(code=1) from e
 
-                timestamp_ms = int((time.monotonic() - t0) * 1000.0)
+        use_terminal_tuning = _stdin_interactive_tuning_available()
+        terminal_listener_stop = threading.Event()
+        terminal_user_quit = threading.Event()
+        term_thread: threading.Thread | None = None
 
-                cache_idx = rot_angle // ROT_RESO
-                if not img_cache[cache_idx]:
-                    print(f"Computing rotated overlay for angle {rot_angle}°.")
-                    comb_img = Image.new("RGB", st_img.size)
-                    draw_img = ImageDraw.Draw(comb_img)
-                    draw_img.ellipse(
-                        (
-                            im_sz[0] * TMP_OFFSET,
-                            im_sz[1] * TMP_OFFSET,
-                            im_sz[0] * (1 - TMP_OFFSET),
-                            im_sz[1] * (1 - TMP_OFFSET),
-                        ),
-                        fill="white",
-                    )
-                    rot_nearest = rot_img.rotate(rot_angle, Image.Resampling.NEAREST)
-                    rot_a_nearest = rot_alpha.rotate(rot_angle, Image.Resampling.NEAREST)
-                    tmp_img = Image.composite(
-                        st_img,
-                        Image.composite(rot_nearest, comb_img, rot_a_nearest),
-                        st_alpha,
-                    )
-                    tmp_img = tmp_img.resize((min_dim, min_dim))
-                    img_cache[cache_idx].append(tmp_img)
-                else:
+        def apply_lambda_deltas(d_roi: float, d_sz: float) -> None:
+            nonlocal roi_lambda_live, size_lambda_live
+            if d_roi != 0.0:
+                roi_lambda_live = min(1.0, max(0.0, roi_lambda_live + d_roi))
+            if d_sz != 0.0:
+                size_lambda_live = min(1.0, max(0.0, size_lambda_live + d_sz))
+            print(
+                f"roi-lambda={roi_lambda_live:.3f}  size-lambda={size_lambda_live:.3f}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        if use_terminal_tuning:
+            logger.info(
+                "Lambda tuning from this terminal: Up/Down = roi-lambda, "
+                "Left/Right = size-lambda (±{}). Quit: Ctrl+Q; stop: Ctrl+C.",
+                LAMBDA_TUNE_STEP,
+            )
+            if show_preview:
+                logger.info(
+                    "Keyboard handling uses this terminal; the OpenCV preview window "
+                    "does not need focus for tuning or quit."
+                )
+            term_thread = threading.Thread(
+                target=_terminal_stdin_tune_loop,
+                args=(
+                    terminal_listener_stop,
+                    terminal_user_quit,
+                    apply_lambda_deltas,
+                ),
+                name="LaughingManStdinTune",
+                daemon=True,
+            )
+            term_thread.start()
+        elif show_preview:
+            logger.info(
+                "Tuning from the preview window: Up/Down = roi-lambda, "
+                "Left/Right = size-lambda (±{}). Quit: Ctrl+Q or Ctrl+C in that window; "
+                "Ctrl+C in the terminal also stops.",
+                LAMBDA_TUNE_STEP,
+            )
+        elif virtual_cam:
+            logger.info("Streaming to virtual camera; press Ctrl+C to exit.")
+
+        try:
+            while True:
+                try:
+                    if terminal_user_quit.is_set():
+                        break
+
+                    ok, frame = cap.read()
+                    if not ok or frame is None or frame.size == 0:
+                        break
+
+                    timestamp_ms = int((time.monotonic() - t0) * 1000.0)
+
+                    cache_idx = rot_angle // ROT_RESO
                     tmp_img = img_cache[cache_idx][0]
 
-                overlay_rgb = np.asarray(tmp_img.convert("RGB"))
-                mask_l = np.asarray(mask_img)
+                    overlay_rgb = np.asarray(tmp_img.convert("RGB"))
+                    mask_l = np.asarray(mask_img)
 
-                run_detection = detect_interval <= 1 or (frame_ix % detect_interval == 0)
-                if run_detection:
-                    last_raw_face = mediapipe_detect_face(detector, frame, timestamp_ms)
+                    last_raw_face = mediapipe_detect_face(
+                        detector, frame, timestamp_ms
+                    )
 
-                smooth_and_draw(
-                    frame,
-                    last_raw_face,
-                    roi_state,
-                    overlay_rgb,
-                    mask_l,
-                    center_lambda=roi_lambda,
-                    size_lambda=size_lambda,
-                    fadeout_lambda=fadeout_lambda,
-                    show_preview=show_preview,
-                )
+                    smooth_and_draw(
+                        frame,
+                        last_raw_face,
+                        roi_state,
+                        overlay_rgb,
+                        mask_l,
+                        center_lambda=roi_lambda_live,
+                        size_lambda=size_lambda_live,
+                        no_face_blur_frames=no_face_blur_frames,
+                        show_preview=show_preview,
+                    )
 
-                if vcam is not None:
-                    vcam.send(frame)
-                    vcam.sleep_until_next_frame()
+                    if vcam is not None:
+                        vcam.send(frame)
+                        vcam.sleep_until_next_frame()
 
-                rot_angle = (rot_angle + ROT_RESO) % 360
-                frame_ix += 1
+                    rot_angle = (rot_angle + ROT_RESO) % 360
 
-                if show_preview:
-                    delay = 1 if virtual_cam else KEY_WAIT_DELAY_MS
-                    if cv2.waitKey(delay) >= 0:
-                        break
-            except KeyboardInterrupt:
-                print("Interrupted.", file=sys.stderr)
-                break
+                    if show_preview:
+                        delay = 1 if virtual_cam else KEY_WAIT_DELAY_MS
+                        key = cv2.waitKeyEx(delay)
+                        if not use_terminal_tuning and key >= 0:
+                            if _should_quit_preview(key):
+                                break
+                            deltas = _lambda_deltas_from_arrow_key(key)
+                            if deltas is not None:
+                                d_roi, d_sz = deltas
+                                apply_lambda_deltas(d_roi, d_sz)
+                except KeyboardInterrupt:
+                    logger.info("Interrupted.")
+                    break
+        finally:
+            terminal_listener_stop.set()
+            if term_thread is not None:
+                term_thread.join(timeout=2.0)
 
     try:
         with create_face_detector() as detector:
-            print(
-                f"TFLite delegate in use: {delegate_label} "
-                f"(requested {'GPU' if use_gpu else 'CPU'}).",
-                file=sys.stderr,
+            logger.debug(
+                "TFLite delegate in use: {} (requested {}).",
+                delegate_label,
+                "GPU" if use_gpu else "CPU",
             )
             if virtual_cam:
                 try:
@@ -560,20 +994,23 @@ def run_overlay(
                         fmt=PixelFormat.BGR,
                         device=v4l2_device,
                     ) as vcam:
-                        print(
-                            f"Virtual camera: {vcam.device} ({vcam.backend}), "
-                            f"{input_w}x{input_h} @ {stream_fps:.1f} fps.",
-                            file=sys.stderr,
+                        logger.debug(
+                            "Virtual camera: {} ({}), {}x{} @ {:.1f} fps.",
+                            vcam.device,
+                            vcam.backend,
+                            input_w,
+                            input_h,
+                            stream_fps,
                         )
                         run_capture_loop(detector, vcam)
                 except RuntimeError as e:
-                    print(
-                        "ERROR: Could not open a virtual camera device. On Linux you "
+                    logger.error(
+                        "Could not open a virtual camera device. On Linux you "
                         "typically need the v4l2loopback kernel module, e.g.\n"
                         "  sudo modprobe v4l2loopback devices=1 video_nr=10 "
-                        "card_label=\"LaughingMan\"\n"
-                        f"Details: {e}",
-                        file=sys.stderr,
+                        'card_label="LaughingMan"\n'
+                        "Details: {}",
+                        e,
                     )
                     raise typer.Exit(code=1) from e
             else:
@@ -603,24 +1040,15 @@ def main(
             "GPU init fails. AMD iGPU may work if drivers expose a supported API."
         ),
     ),
-    detect_interval: int = typer.Option(
-        1,
-        "--detect-interval",
-        min=1,
-        help=(
-            "Run BlazeFace every N frames (1 = every frame). Larger values save "
-            "work but reuse the last box between detections and usually feel worse."
-        ),
-    ),
     roi_lambda: float = typer.Option(
         DEFAULT_ROI_LAMBDA,
         "--roi-lambda",
         min=0.0,
         max=1.0,
         help=(
-            "Low-pass on the overlay **center** vs the detected face center "
-            "(0 = snap; higher = stickier). Does not control box size; see "
-            "--size-lambda."
+            "Low-pass on **horizontal** overlay position vs the detector (0 = snap; "
+            "higher = stickier left-right). Vertical placement follows the detector "
+            "each frame. Does not control box size; see --size-lambda."
         ),
     ),
     size_lambda: float = typer.Option(
@@ -630,16 +1058,18 @@ def main(
         max=1.0,
         help=(
             "Low-pass on overlay **width/height** vs the detector box (higher = "
-            "less size jitter when pose changes). Typically higher than "
-            "--roi-lambda because bbox size fluctuates more than real head size."
+            "less size jitter when pose changes). Raise above --roi-lambda if bbox "
+            "size fluctuates more than you want relative to horizontal position."
         ),
     ),
-    fadeout_lambda: float = typer.Option(
-        DEFAULT_FADEOUT_LAMBDA,
-        "--fadeout-lambda",
-        min=0.0,
-        max=1.0,
-        help="Per-frame shrink of the box when no face is detected (fade out).",
+    no_face_blur_frames: int = typer.Option(
+        DEFAULT_NO_FACE_BLUR_FRAMES,
+        "--no-face-blur-frames",
+        min=1,
+        help=(
+            "Consecutive frames with no face before full-frame privacy blur. "
+            "Until then the overlay stays at the last smoothed position (reduces flicker)."
+        ),
     ),
     virtual_cam: bool = typer.Option(
         False,
@@ -672,15 +1102,20 @@ def main(
             "only to the virtual device (quit with Ctrl+C)."
         ),
     ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Verbose logging (overlay prefill, TFLite delegate, virtual camera details).",
+    ),
 ) -> None:
     """Run the Laughing Man webcam overlay."""
+    _configure_logging(debug=debug)
     run_overlay(
         full_range=full_range,
         use_gpu=gpu,
-        detect_interval=detect_interval,
         roi_lambda=roi_lambda,
         size_lambda=size_lambda,
-        fadeout_lambda=fadeout_lambda,
+        no_face_blur_frames=no_face_blur_frames,
         virtual_cam=virtual_cam,
         v4l2_device=v4l2_device,
         virtual_fps=virtual_fps,

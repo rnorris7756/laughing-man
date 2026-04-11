@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Webcam Laughing Man face overlay (MediaPipe + OpenCV + Pillow)"
 requires-python = ">=3.10"
 dependencies = [
+    "loguru>=0.7.3",
     "mediapipe>=0.10.33",
     "pillow>=12.2.0",
     "pyvirtualcam>=0.15.0",
