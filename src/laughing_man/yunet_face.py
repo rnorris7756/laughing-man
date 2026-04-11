@@ -100,9 +100,7 @@ class YuNetFaceBoxSource:
     def __init__(self, detector: cv2.FaceDetectorYN) -> None:
         self._detector = detector
 
-    def face_box(
-        self, frame: np.ndarray, timestamp_ms: int
-    ) -> tuple[int, int, int, int] | None:
+    def face_box(self, frame: np.ndarray, timestamp_ms: int) -> tuple[int, int, int, int] | None:
         h, w = frame.shape[:2]
         self._detector.setInputSize((w, h))
         _, faces = self._detector.detect(frame)

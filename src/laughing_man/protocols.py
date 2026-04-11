@@ -10,9 +10,7 @@ import numpy as np
 class FaceBoxSource(Protocol):
     """Produces a raw face bounding box from a BGR frame."""
 
-    def face_box(
-        self, frame: np.ndarray, timestamp_ms: int
-    ) -> tuple[int, int, int, int] | None:
+    def face_box(self, frame: np.ndarray, timestamp_ms: int) -> tuple[int, int, int, int] | None:
         """
         Parameters
         ----------

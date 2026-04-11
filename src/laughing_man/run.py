@@ -43,13 +43,13 @@ from laughing_man.overlay import build_rotated_overlay_frame, load_overlay_image
 from laughing_man.privacy import GaussianBlurPrivacy
 from laughing_man.protocols import FaceBoxSource
 from laughing_man.roi import RoiState, smooth_and_draw
-from laughing_man.yunet_face import YuNetFaceBoxSource, create_yunet_detector
 from laughing_man.tuning import (
     lambda_deltas_from_arrow_key,
     should_quit_preview,
     stdin_interactive_tuning_available,
     terminal_stdin_tune_loop,
 )
+from laughing_man.yunet_face import YuNetFaceBoxSource, create_yunet_detector
 
 
 def run_overlay(
@@ -113,9 +113,7 @@ def run_overlay(
         (see ``--roi-motion``).
     """
     if not virtual_cam and not show_preview:
-        logger.error(
-            "Need at least one of --virtual-cam or preview (omit --no-preview)."
-        )
+        logger.error("Need at least one of --virtual-cam or preview (omit --no-preview).")
         raise typer.Exit(code=1)
 
     deps = PipelineDeps(privacy=GaussianBlurPrivacy())
@@ -188,9 +186,7 @@ def run_overlay(
 
     elif face_backend == "yunet":
         if full_range:
-            logger.warning(
-                "--full-range applies to BlazeFace only; ignoring for YuNet."
-            )
+            logger.warning("--full-range applies to BlazeFace only; ignoring for YuNet.")
         yunet_path, yunet_url = resolve_yunet_model()
         ensure_yunet_model(yunet_path, yunet_url)
     else:
@@ -416,9 +412,7 @@ def run_overlay(
     try:
         if face_backend == "blaze":
             if cascade_margin > 0:
-                logger.warning(
-                    "--cascade-margin applies to YuNet only; ignoring for BlazeFace."
-                )
+                logger.warning("--cascade-margin applies to YuNet only; ignoring for BlazeFace.")
             with create_face_detector() as detector:
                 logger.debug(
                     "TFLite delegate in use: {} (requested {}).",
@@ -432,9 +426,7 @@ def run_overlay(
             yunet_det = create_yunet_detector(yunet_path, input_w, input_h)
             inner = YuNetFaceBoxSource(yunet_det)
             if cascade_margin > 0:
-                cascaded: FaceBoxSource = CascadedFaceBoxSource(
-                    inner, cascade_margin, roi_state
-                )
+                cascaded: FaceBoxSource = CascadedFaceBoxSource(inner, cascade_margin, roi_state)
                 logger.info(
                     "Face backend: yunet (OpenCV YuNet), cascade_margin={:.3f}",
                     cascade_margin,

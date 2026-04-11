@@ -58,9 +58,7 @@ def expand_box_with_margin(
     return _clamp_rect(ix0, iy0, cw, ch, frame_w, frame_h)
 
 
-def _clamp_rect(
-    x: int, y: int, w: int, h: int, frame_w: int, frame_h: int
-) -> tuple[int, int, int, int]:
+def _clamp_rect(x: int, y: int, w: int, h: int, frame_w: int, frame_h: int) -> tuple[int, int, int, int]:
     if x < 0:
         w += x
         x = 0
@@ -156,9 +154,7 @@ class CascadedFaceBoxSource:
         self._margin = margin
         self._state = roi_state
 
-    def face_box(
-        self, frame: np.ndarray, timestamp_ms: int
-    ) -> tuple[int, int, int, int] | None:
+    def face_box(self, frame: np.ndarray, timestamp_ms: int) -> tuple[int, int, int, int] | None:
         """Run detection on a crop from the previous box, or full frame."""
         frame_h, frame_w = frame.shape[:2]
         prev = self._state.prev
@@ -166,9 +162,7 @@ class CascadedFaceBoxSource:
             return self._inner.face_box(frame, timestamp_ms)
 
         px, py, pw, ph = prev
-        x0, y0, cw, ch = expand_box_with_margin(
-            px, py, pw, ph, self._margin, frame_w, frame_h
-        )
+        x0, y0, cw, ch = expand_box_with_margin(px, py, pw, ph, self._margin, frame_w, frame_h)
         crop = frame[y0 : y0 + ch, x0 : x0 + cw]
         if crop.size == 0:
             return self._inner.face_box(frame, timestamp_ms)

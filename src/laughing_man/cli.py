@@ -118,8 +118,7 @@ def main(
         readable=True,
         resolve_path=True,
         help=(
-            "PNG/JPEG/etc. to composite on the face instead of the default "
-            "Laughing Man assets (limg.png / ltext.png)."
+            "PNG/JPEG/etc. to composite on the face instead of the default Laughing Man assets (limg.png / ltext.png)."
         ),
     ),
     overlay_scale: float = typer.Option(

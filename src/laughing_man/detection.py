@@ -66,15 +66,9 @@ def mediapipe_detect_face(
     return pick_largest_face(list(result.detections), min_w, min_h)
 
 
-def face_detector_options(
-    model_path: Path, *, use_gpu: bool
-) -> vision.FaceDetectorOptions:
+def face_detector_options(model_path: Path, *, use_gpu: bool) -> vision.FaceDetectorOptions:
     """Build FaceDetectorOptions for CPU or TFLite GPU delegate."""
-    delegate = (
-        python.BaseOptions.Delegate.GPU
-        if use_gpu
-        else python.BaseOptions.Delegate.CPU
-    )
+    delegate = python.BaseOptions.Delegate.GPU if use_gpu else python.BaseOptions.Delegate.CPU
     base_options = python.BaseOptions(
         model_asset_path=str(model_path),
         delegate=delegate,
@@ -95,7 +89,5 @@ class BlazeFaceFaceBoxSource:
     def __init__(self, detector: vision.FaceDetector) -> None:
         self._detector = detector
 
-    def face_box(
-        self, frame: np.ndarray, timestamp_ms: int
-    ) -> tuple[int, int, int, int] | None:
+    def face_box(self, frame: np.ndarray, timestamp_ms: int) -> tuple[int, int, int, int] | None:
         return mediapipe_detect_face(self._detector, frame, timestamp_ms)

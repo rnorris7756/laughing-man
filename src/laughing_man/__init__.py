@@ -11,6 +11,6 @@ from laughing_man.bootstrap import apply_runtime_env
 
 apply_runtime_env()
 
-from laughing_man.cli import app
+from laughing_man.cli import app  # noqa: E402
 
 __all__ = ["app"]

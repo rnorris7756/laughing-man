@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from importlib.resources import files
-from importlib.resources.abc import Traversable
 from pathlib import Path
+from typing import Any
 
 import typer
 from loguru import logger
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageDraw
 
-from laughing_man.constants import ROT_IMAGE_NAME, STABLE_IMAGE_NAME, TMP_OFFSET
+from laughing_man.constants import ROT_IMAGE_NAME, STABLE_IMAGE_NAME
 
 
 def build_rotated_overlay_frame(
@@ -122,8 +122,14 @@ def load_overlay_images(
     return st_img, rot_img
 
 
-def _load_bundled_rgba(path: Traversable) -> Image.Image:
-    """Load a PNG from package resources as RGBA."""
+def _load_bundled_rgba(path: Any) -> Image.Image:
+    """Load a PNG from package resources as RGBA.
+
+    Parameters
+    ----------
+    path
+        A :mod:`importlib.resources` traversable path (``Traversable``).
+    """
     with path.open("rb") as f:
         img = Image.open(f).convert("RGBA")
     img.load()

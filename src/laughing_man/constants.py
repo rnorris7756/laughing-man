@@ -18,8 +18,7 @@ MODEL_ENV = "LAUGHING_MAN_FACE_MODEL"
 
 # OpenCV YuNet (face_detection_yunet_2023mar.onnx); used when --face-backend yunet.
 YUNET_MODEL_URL = (
-    "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/"
-    "face_detection_yunet_2023mar.onnx"
+    "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 )
 YUNET_MODEL_ENV = "LAUGHING_MAN_YUNET_MODEL"
 

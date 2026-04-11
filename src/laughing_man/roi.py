@@ -233,14 +233,10 @@ def smooth_and_draw(
                     new_h = size_lambda * ph + (1.0 - size_lambda) * h_det
                     prev_cx = px + pw / 2.0
                     prev_cy = py + ph / 2.0
-                    roi_cx, roi_cy = blend_detection_centers(
-                        prev_cx, prev_cy, det_cx, det_cy, center_lambda
-                    )
+                    roi_cx, roi_cy = blend_detection_centers(prev_cx, prev_cy, det_cx, det_cy, center_lambda)
                     new_x = roi_cx - new_w / 2.0
                     new_y = roi_cy - new_h / 2.0 - y_shift
-                    new_x, new_y, new_w, new_h = clamp_roi(
-                        new_x, new_y, new_w, new_h, frame_w, frame_h
-                    )
+                    new_x, new_y, new_w, new_h = clamp_roi(new_x, new_y, new_w, new_h, frame_w, frame_h)
                     state.prev = (new_x, new_y, new_w, new_h)
                     ix, iy = int(round(new_x)), int(round(new_y))
                     iw, ih = int(round(new_w)), int(round(new_h))
@@ -258,11 +254,7 @@ def smooth_and_draw(
 
                 meas_cx = det_cx
                 meas_cy = det_cy
-                if (
-                    roi_motion == "kalman_flow"
-                    and state.prev_gray is not None
-                    and state.prev is not None
-                ):
+                if roi_motion == "kalman_flow" and state.prev_gray is not None and state.prev is not None:
                     cur_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     px, py, pw, ph = state.prev
                     shift = optical_flow_center_shift(
@@ -285,9 +277,7 @@ def smooth_and_draw(
                 cx, cy, kw, kh = state.kalman.update(z)
                 new_x = float(cx) - kw / 2.0
                 new_y = float(cy) - kh / 2.0 - y_shift
-                new_x, new_y, new_w, new_h = clamp_roi(
-                    new_x, new_y, float(kw), float(kh), frame_w, frame_h
-                )
+                new_x, new_y, new_w, new_h = clamp_roi(new_x, new_y, float(kw), float(kh), frame_w, frame_h)
                 state.prev = (new_x, new_y, new_w, new_h)
                 ix, iy = int(round(new_x)), int(round(new_y))
                 iw, ih = int(round(new_w)), int(round(new_h))

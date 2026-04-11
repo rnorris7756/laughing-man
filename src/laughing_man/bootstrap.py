@@ -25,6 +25,4 @@ def apply_runtime_env() -> None:
         qt_rules_extra = "*.debug=false;qt.qpa.*=false"
         prev_rules = os.environ.get("QT_LOGGING_RULES", "").strip()
         if qt_rules_extra not in prev_rules:
-            os.environ["QT_LOGGING_RULES"] = (
-                f"{prev_rules};{qt_rules_extra}" if prev_rules else qt_rules_extra
-            )
+            os.environ["QT_LOGGING_RULES"] = f"{prev_rules};{qt_rules_extra}" if prev_rules else qt_rules_extra
