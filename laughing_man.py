@@ -44,8 +44,8 @@ MIN_DETECTION_CONFIDENCE = 0.45
 MIN_SUPPRESSION_THRESHOLD = 0.3
 
 ROT_RESO = 5
-ROI_LAMBDA = 0.95
-FADEOUT_LAMBDA = 0.99
+DEFAULT_ROI_LAMBDA = 0.35
+DEFAULT_FADEOUT_LAMBDA = 0.99
 FADEOUT_LIM = 50
 ROI_SCALER = 1.3
 
@@ -142,6 +142,35 @@ def _pick_largest_face(
     return best
 
 
+def mediapipe_detect_face(
+    detector: vision.FaceDetector,
+    frame: np.ndarray,
+    timestamp_ms: int,
+) -> tuple[int, int, int, int] | None:
+    """
+    Run BlazeFace on this frame and return the largest face box, if any.
+
+    Parameters
+    ----------
+    detector
+        MediaPipe FaceDetector (VIDEO running mode).
+    frame
+        BGR image.
+    timestamp_ms
+        Monotonic time for ``detect_for_video``.
+
+    Returns
+    -------
+    tuple[int, int, int, int] | None
+        ``(x, y, w, h)`` in pixels, or None if no face passes the minimum size.
+    """
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    result = detector.detect_for_video(mp_image, timestamp_ms)
+    min_w, min_h = MIN_FACE_SIZE
+    return _pick_largest_face(list(result.detections), min_w, min_h)
+
+
 def _clamp_roi(
     x: float,
     y: float,
@@ -164,49 +193,47 @@ def _clamp_roi(
     return (x, y, w, h)
 
 
-def detect_and_draw(
+def smooth_and_draw(
     frame: np.ndarray,
-    detector: vision.FaceDetector,
-    timestamp_ms: int,
+    raw_face: tuple[int, int, int, int] | None,
+    state: RoiState,
     overlay_rgb: np.ndarray,
     mask_l: np.ndarray,
-    state: RoiState,
+    *,
+    roi_lambda: float,
+    fadeout_lambda: float,
 ) -> None:
     """
-    Detect the largest face, smooth the ROI, and alpha-composite the overlay.
+    Apply temporal smoothing to the face box, then alpha-composite the overlay.
 
     Parameters
     ----------
     frame
         BGR image (modified in place in the face region).
-    detector
-        MediaPipe FaceDetector (VIDEO running mode).
-    timestamp_ms
-        Monotonic timestamp for ``detect_for_video`` (must not decrease).
+    raw_face
+        New detection for this logical frame, or None if none / skipped.
+    state
+        Tracks the smoothed ROI between frames.
     overlay_rgb
         RGB uint8 image, same size as the face ROI when drawn.
     mask_l
         Single-channel uint8 mask (0–255), same spatial size as ``overlay_rgb``.
-    state
-        Tracks the smoothed ROI between frames.
+    roi_lambda
+        Low-pass on the box when a face is present (0 = snap to raw detection).
+    fadeout_lambda
+        Shrink factor per frame when no face is seen.
     """
     frame_h, frame_w = frame.shape[:2]
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-    result = detector.detect_for_video(mp_image, timestamp_ms)
-
-    min_w, min_h = MIN_FACE_SIZE
-    face = _pick_largest_face(list(result.detections), min_w, min_h)
 
     r: tuple[int, int, int, int] | None = None
 
-    if face is None:
+    if raw_face is None:
         if state.prev is not None:
             px, py, pw, ph = state.prev
             roi_cx = px + pw / 2.0
             roi_cy = py + ph / 2.0
-            new_w = FADEOUT_LAMBDA * pw
-            new_h = FADEOUT_LAMBDA * ph
+            new_w = fadeout_lambda * pw
+            new_h = fadeout_lambda * ph
             new_x = roi_cx - new_w / 2.0
             new_y = roi_cy - new_h / 2.0
             state.prev = (new_x, new_y, new_w, new_h)
@@ -217,16 +244,16 @@ def detect_and_draw(
             else:
                 r = (ix, iy, iw, ih)
     else:
-        x, y, w, h = face
+        x, y, w, h = raw_face
         if state.prev is None:
             state.prev = (float(x), float(y), float(w), float(h))
             r = (x, y, w, h)
         else:
             px, py, pw, ph = state.prev
-            new_w = ROI_LAMBDA * pw + (1.0 - ROI_LAMBDA) * w * ROI_SCALER
-            new_h = ROI_LAMBDA * ph + (1.0 - ROI_LAMBDA) * h * ROI_SCALER
-            roi_cx = ROI_LAMBDA * (px + pw / 2.0) + (1.0 - ROI_LAMBDA) * (x + w / 2.0)
-            roi_cy = ROI_LAMBDA * (py + ph / 2.0) + (1.0 - ROI_LAMBDA) * (y + h / 2.0)
+            new_w = roi_lambda * pw + (1.0 - roi_lambda) * w * ROI_SCALER
+            new_h = roi_lambda * ph + (1.0 - roi_lambda) * h * ROI_SCALER
+            roi_cx = roi_lambda * (px + pw / 2.0) + (1.0 - roi_lambda) * (x + w / 2.0)
+            roi_cy = roi_lambda * (py + ph / 2.0) + (1.0 - roi_lambda) * (y + h / 2.0)
             new_x = roi_cx - new_w / 2.0
             new_y = roi_cy - new_h / 2.0
             new_x, new_y, new_w, new_h = _clamp_roi(
@@ -262,7 +289,35 @@ def detect_and_draw(
     cv2.imshow(MAIN_WIN_NAME, frame)
 
 
-def run_overlay(*, full_range: bool) -> None:
+def _face_detector_options(
+    model_path: Path, *, use_gpu: bool
+) -> vision.FaceDetectorOptions:
+    """Build FaceDetectorOptions for CPU or TFLite GPU delegate."""
+    delegate = (
+        python.BaseOptions.Delegate.GPU
+        if use_gpu
+        else python.BaseOptions.Delegate.CPU
+    )
+    base_options = python.BaseOptions(
+        model_asset_path=str(model_path),
+        delegate=delegate,
+    )
+    return vision.FaceDetectorOptions(
+        base_options=base_options,
+        running_mode=vision.RunningMode.VIDEO,
+        min_detection_confidence=MIN_DETECTION_CONFIDENCE,
+        min_suppression_threshold=MIN_SUPPRESSION_THRESHOLD,
+    )
+
+
+def run_overlay(
+    *,
+    full_range: bool,
+    use_gpu: bool,
+    detect_interval: int,
+    roi_lambda: float,
+    fadeout_lambda: float,
+) -> None:
     """
     Run webcam capture with Laughing Man overlay.
 
@@ -271,17 +326,48 @@ def run_overlay(*, full_range: bool) -> None:
     full_range
         If True, use BlazeFace full-range (smaller/distant faces). Otherwise
         short-range (typical desk webcam).
+    use_gpu
+        If True, request MediaPipe's TFLite **GPU** delegate (not the same as
+        "use CUDA" in PyTorch). Falls back to CPU if creation fails.
+    detect_interval
+        Run BlazeFace every N frames (1 = every frame). Values greater than 1
+        reduce CPU/GPU load but reuse the last detection between runs, which
+        can increase perceived lag.
+    roi_lambda
+        Temporal smoothing when a face is visible (0 = follow raw detections).
+    fadeout_lambda
+        Shrink rate for the box when the face is lost.
     """
     model_path, model_url = _resolve_model(full_range)
     _ensure_blaze_face_model(model_path, model_url)
 
-    base_options = python.BaseOptions(model_asset_path=str(model_path))
-    options = vision.FaceDetectorOptions(
-        base_options=base_options,
-        running_mode=vision.RunningMode.VIDEO,
-        min_detection_confidence=MIN_DETECTION_CONFIDENCE,
-        min_suppression_threshold=MIN_SUPPRESSION_THRESHOLD,
-    )
+    delegate_label: str
+
+    def create_face_detector() -> vision.FaceDetector:
+        """Open FaceDetector, falling back from GPU to CPU on failure."""
+        nonlocal delegate_label
+        opts = _face_detector_options(model_path, use_gpu=use_gpu)
+        try:
+            delegate_label = "GPU" if use_gpu else "CPU"
+            return vision.FaceDetector.create_from_options(opts)
+        except Exception as e:
+            if use_gpu:
+                print(
+                    f"GPU delegate failed ({type(e).__name__}: {e}); using CPU.",
+                    file=sys.stderr,
+                )
+                opts = _face_detector_options(model_path, use_gpu=False)
+                try:
+                    delegate_label = "CPU"
+                    return vision.FaceDetector.create_from_options(opts)
+                except Exception as e2:
+                    print(
+                        f"ERROR: Could not create face detector: {e2}",
+                        file=sys.stderr,
+                    )
+                    raise typer.Exit(code=1) from e2
+            print(f"ERROR: Could not create face detector: {e}", file=sys.stderr)
+            raise typer.Exit(code=1) from e
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
@@ -325,11 +411,18 @@ def run_overlay(*, full_range: bool) -> None:
 
     roi_state = RoiState()
     t0 = time.monotonic()
+    frame_ix = 0
+    last_raw_face: tuple[int, int, int, int] | None = None
 
     print("Press any key in the window to quit, or Ctrl+C to exit.", file=sys.stderr)
 
     try:
-        with vision.FaceDetector.create_from_options(options) as detector:
+        with create_face_detector() as detector:
+            print(
+                f"TFLite delegate in use: {delegate_label} "
+                f"(requested {'GPU' if use_gpu else 'CPU'}).",
+                file=sys.stderr,
+            )
             while True:
                 try:
                     ok, frame = cap.read()
@@ -367,16 +460,24 @@ def run_overlay(*, full_range: bool) -> None:
                     overlay_rgb = np.asarray(tmp_img.convert("RGB"))
                     mask_l = np.asarray(mask_img)
 
-                    detect_and_draw(
+                    run_detection = detect_interval <= 1 or (frame_ix % detect_interval == 0)
+                    if run_detection:
+                        last_raw_face = mediapipe_detect_face(
+                            detector, frame, timestamp_ms
+                        )
+
+                    smooth_and_draw(
                         frame,
-                        detector,
-                        timestamp_ms,
+                        last_raw_face,
+                        roi_state,
                         overlay_rgb,
                         mask_l,
-                        roi_state,
+                        roi_lambda=roi_lambda,
+                        fadeout_lambda=fadeout_lambda,
                     )
 
                     rot_angle = (rot_angle + ROT_RESO) % 360
+                    frame_ix += 1
                     if cv2.waitKey(KEY_WAIT_DELAY_MS) >= 0:
                         break
                 except KeyboardInterrupt:
@@ -397,9 +498,53 @@ def main(
             "or far from the camera). Default is short-range (typical desk webcam)."
         ),
     ),
+    gpu: bool = typer.Option(
+        False,
+        "--gpu",
+        help=(
+            "Use MediaPipe's TensorFlow Lite GPU delegate when possible. This is "
+            "not the same as CUDA in PyTorch; it uses the GPU via TFLite's "
+            "graphics/compute path (vendor-dependent). Falls back to CPU if "
+            "GPU init fails. AMD iGPU may work if drivers expose a supported API."
+        ),
+    ),
+    detect_interval: int = typer.Option(
+        1,
+        "--detect-interval",
+        min=1,
+        help=(
+            "Run BlazeFace every N frames (1 = every frame). Larger values save "
+            "work but reuse the last box between detections and usually feel worse."
+        ),
+    ),
+    roi_lambda: float = typer.Option(
+        DEFAULT_ROI_LAMBDA,
+        "--roi-lambda",
+        min=0.0,
+        max=1.0,
+        help=(
+            "How much to blend the previous overlay box with the new detection "
+            "(0 = snap to raw detections, less lag; 1 = never move—unusable). "
+            "Default follows the original demo (~0.95), which feels smooth but lags "
+            "when you move quickly."
+        ),
+    ),
+    fadeout_lambda: float = typer.Option(
+        DEFAULT_FADEOUT_LAMBDA,
+        "--fadeout-lambda",
+        min=0.0,
+        max=1.0,
+        help="Per-frame shrink of the box when no face is detected (fade out).",
+    ),
 ) -> None:
     """Run the Laughing Man webcam overlay."""
-    run_overlay(full_range=full_range)
+    run_overlay(
+        full_range=full_range,
+        use_gpu=gpu,
+        detect_interval=detect_interval,
+        roi_lambda=roi_lambda,
+        fadeout_lambda=fadeout_lambda,
+    )
 
 
 if __name__ == "__main__":
