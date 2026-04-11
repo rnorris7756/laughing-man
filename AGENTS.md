@@ -1,5 +1,27 @@
 # Agent and contributor notes
 
+## Cursor cloud and headless environments
+
+This is a **Python CLI** app (webcam face overlay) managed with **uv** — no Docker, databases, or external services required for development.
+
+### Quick reference
+
+| Action | Command |
+| --- | --- |
+| Install / sync deps | `uv sync --group dev` |
+| Lint (Ruff) | `uv run ruff check src tests scripts` |
+| Typecheck (ty) | `uv run ty check` |
+| Run tests | `uv run pytest` (add `-v` for verbose) |
+| CLI help | `uv run laughing-man --help` |
+| Run the app | `uv run laughing-man` (needs a webcam) |
+
+### Environment caveats
+
+- **Webcam at runtime.** The main command opens a camera (often `/dev/video0` on Linux). In a **headless cloud VM** without a camera device, run **unit tests** and **import checks** only; the live overlay loop fails when opening the camera.
+- **Model download.** BlazeFace (`.tflite`) and YuNet (`.onnx`) may be fetched to `~/.cache/laughing-man/` on first use — **network access** may be required once.
+- **`tool.uv.link-mode = "copy"`** in `pyproject.toml` avoids broken OpenCV wheels when the uv cache and `.venv` sit on different filesystems. Do not change this without a good reason.
+- **Python version.** `.python-version` pins **3.13** for local/CI convenience; `requires-python` in `pyproject.toml` remains **>=3.10** for compatibility.
+
 ## Conventional commits
 
 Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages so history stays readable and tooling (changelog generators, semantic versioning) can work if adopted later.
