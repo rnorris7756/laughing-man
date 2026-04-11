@@ -35,6 +35,10 @@ DEFAULT_ROI_LAMBDA = 0.55
 DEFAULT_SIZE_LAMBDA = 0.55
 FADEOUT_LIM = 50
 PRIVACY_BLUR_MAX_SIGMA = 28.0
+# Linear size ratio for privacy blur (width/height). Blur runs on a downscaled
+# frame with sigma scaled by the same factor, then upscaled — much faster than
+# full-resolution blur at PRIVACY_BLUR_MAX_SIGMA. Use 1.0 to disable downscaling.
+PRIVACY_BLUR_DOWNSCALE = 0.25
 DEFAULT_NO_FACE_BLUR_FRAMES = 3
 ROI_SCALER = 1.3 * 1.08
 
