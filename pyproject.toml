@@ -1,0 +1,9 @@
+[project]
+name = "laughing-man"
+version = "0.1.0"
+description = "Webcam Laughing Man face overlay (OpenCV + Pillow)"
+requires-python = ">=3.10"
+dependencies = [
+    "opencv-python>=4.13.0.92",
+    "pillow>=12.2.0",
+]

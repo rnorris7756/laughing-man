@@ -1,230 +1,273 @@
 #
-# laughingMan.py
+# laughing-man.py
 #
-# Uses pyOpenCV for video capture, face detection, and video display.
-# Uses PIL for creating the overlaid image and mask.
+# Webcam face detection with Laughing Man overlay (Ghost in the Shell style).
+# Modern stack: OpenCV (cv2), NumPy, Pillow.
 #
-# Based on the face detection example in pyOpenCV and the Processing
-# implementation of same functionality <http://www.awgh.org/?p=21>.
+# Original: pyOpenCV + PIL, Jouni Paulus, 2010.
 #
-# Jouni Paulus, jouni.paulus(a)iki.fi, 16.5.2010
+
+from __future__ import annotations
 
 import sys
-import pyopencv
-from PIL import Image, ImageDraw, ImageChops
+from dataclasses import dataclass
+from pathlib import Path
 
-# face detection templates
-cascadeName = "haarcascade_frontalface_alt.xml"
+import cv2
+import numpy as np
+from PIL import Image, ImageChops, ImageDraw
 
-# two figures for the Laughing Man mask, first is a static one, second 
-# the rotating text
-stableImageName = "limg.png"
-rotImageName = "ltext.png"
+# Face detection (bundled with opencv-python)
+CASCADE_NAME = "haarcascade_frontalface_alt.xml"
 
-# don't try to detect too small faces
-minFaceSize = pyopencv.Size(100, 100) 
+# Overlay assets: static logo + rotating text plate
+STABLE_IMAGE_NAME = "limg.png"
+ROT_IMAGE_NAME = "ltext.png"
 
-# degrees, the caching will use 360/rotReso times the overlay image
-# size the memory
-rotReso = 5
+# Ignore very small detections
+MIN_FACE_SIZE = (100, 100)
 
-# first order IIR low-pass for the ROI coordinates 
-# newROI = roiLambda*prevROI + (1-roiLambda)*foundROI
-roiLambda = 0.95
-# if no face is found, the earlier ROI will be faded out
-fadeoutLambda = 0.99
-# ROI smaller than this will be regarded as empty
-fadeoutLim = 50
-# prevROI will be stored as floats. otherwise the rounding errors mess
-# the LP filtering
-prevROI = None 
+# Degrees; cache has 360 / ROT_RESO entries
+ROT_RESO = 5
 
-# increase the actual mask from the detected face a bit
-roiScaler = 1.3
+# First-order low-pass on ROI: new = roi_lambda * prev + (1 - roi_lambda) * found
+ROI_LAMBDA = 0.95
+# When face is lost, shrink ROI until it disappears
+FADEOUT_LAMBDA = 0.99
+FADEOUT_LIM = 50
 
-keyWaitDelay = 25
+# Expand detected face box slightly
+ROI_SCALER = 1.3
 
-mainWinName = "pyLaughingMan, v.0.1"
+KEY_WAIT_DELAY_MS = 25
+MAIN_WIN_NAME = "Laughing Man (OpenCV)"
+TMP_OFFSET = 0.1
 
-def detectAndDraw(img, cascade, overlayImg, maskImg):
-    global prevROI
 
-    # copy input image into processing input: grayscale, histogram equalised
-    smallImg = pyopencv.Mat()
-    pyopencv.cvtColor(img, smallImg, pyopencv.CV_BGR2GRAY)
-    pyopencv.equalizeHist(smallImg, smallImg)
+@dataclass
+class RoiState:
+    """Smoothed face bounding box in float coordinates."""
 
-    # detect only the largest face -> huge speedup
-    faces = cascade.detectMultiScale( smallImg,
-        1.1, 2, 0
-        |pyopencv.CascadeClassifier.SCALE_IMAGE
-        |pyopencv.CascadeClassifier.FIND_BIGGEST_OBJECT,
-        minFaceSize ).to_list_of_Rect()
+    prev: tuple[float, float, float, float] | None = None
 
-    overlayImgRe = pyopencv.Mat()
-    maskImgRe = pyopencv.Mat()
-    imSize = img.size()
-    if len(faces)==0:
-        # no face detected. fade out existing ROI
-        r = None
-        if prevROI!=None:
-            r = pyopencv.Rect()
-            # slowly reduce the size of earlier ROI
-            roiCX = prevROI[0] + prevROI[2]/2.0
-            roiCY = prevROI[1] + prevROI[3]/2.0
 
-            newWidth = fadeoutLambda*prevROI[2]
-            newHeight = fadeoutLambda*prevROI[3]
-            
-            newX = roiCX - newWidth/2.0
-            newY = roiCY - newHeight/2.0
+def _clamp_roi(
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    frame_w: int,
+    frame_h: int,
+) -> tuple[float, float, float, float]:
+    """Clamp a rectangle so it stays inside the frame."""
+    if x < 0:
+        w += x
+        x = 0
+    if y < 0:
+        h += y
+        y = 0
+    if x + w > frame_w:
+        w = float(frame_w - x)
+    if y + h > frame_h:
+        h = float(frame_h - y)
+    return (x, y, w, h)
 
-            # plain type cast truncates
-            r.x = int(round(newX))
-            r.y = int(round(newY))
-            r.width = int(round(newWidth))
-            r.height = int(round(newHeight))
-            prevROI = (newX, newY, newWidth, newHeight)
-            if r.width<fadeoutLim or r.height<fadeoutLim:
-                r = None
-                prevROI = None
-    else:
-        # found a face. filter ROI coordinates and apply image modification
-        r = faces[0]
-        if prevROI==None:
-            prevROI = (r.x*1.0, r.y*1.0, r.width*1.0, r.height*1.0)
-        else:
-            newWidth = roiLambda*prevROI[2] + (1.0-roiLambda)*r.width*roiScaler
-            newHeight = roiLambda*prevROI[3] + (1.0-roiLambda)*r.height*roiScaler
-            roiCX = roiLambda*(prevROI[0] + prevROI[2]/2.0) + (1.0-roiLambda)*(r.x + r.width/2.0)
-            roiCY = roiLambda*(prevROI[1] + prevROI[3]/2.0) + (1.0-roiLambda)*(r.y + r.height/2.0)
 
-            newX = roiCX - newWidth/2.0
-            newY = roiCY - newHeight/2.0
-  
-            # cap the ROI borders to image borders
-            if newX<0:
-                newX = 0
-            if newY<0:
-                newY = 0
-            if newX+newWidth>imSize[0]:
-                newWidth = imSize[0] - newX
-            if newY+newHeight>imSize[1]:
-                newHeight = imSize[1] - newY
+def detect_and_draw(
+    frame: np.ndarray,
+    cascade: cv2.CascadeClassifier,
+    overlay_rgb: np.ndarray,
+    mask_l: np.ndarray,
+    state: RoiState,
+) -> None:
+    """
+    Detect the largest face, smooth the ROI, and alpha-composite the overlay.
 
-            prevROI = (newX, newY, newWidth, newHeight)
+    Parameters
+    ----------
+    frame
+        BGR image (modified in place in the face region).
+    cascade
+        Loaded Haar cascade classifier.
+    overlay_rgb
+        RGB uint8 image, same size as the face ROI when drawn.
+    mask_l
+        Single-channel uint8 mask (0–255), same spatial size as ``overlay_rgb``.
+    state
+        Tracks the smoothed ROI between frames.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.equalizeHist(gray)
+    frame_h, frame_w = frame.shape[:2]
 
-            # plain type cast truncates
-            r.x = int(round(newX))
-            r.y = int(round(newY))
-            r.width = int(round(newWidth))
-            r.height = int(round(newHeight))
+    faces = cascade.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=2,
+        flags=cv2.CASCADE_SCALE_IMAGE | cv2.CASCADE_FIND_BIGGEST_OBJECT,
+        minSize=MIN_FACE_SIZE,
+    )
 
-            if r.width<fadeoutLim or r.height<fadeoutLim:
-                r = None
-                prevROI = None
+    r: tuple[int, int, int, int] | None = None
 
-    if r!=None:
-        roiSize = r.size()
-        faceROI = img(r) # set ROI
-
-        # resize the mask and overlay image 
-        overlayImgRe = pyopencv.Mat.from_pil_image(overlayImg.resize((roiSize[0], roiSize[1])))
-        maskImgRe = pyopencv.Mat.from_pil_image(maskImg.resize((roiSize[0], roiSize[1])))
-        
-        # ugly hack to draw full overlay, but didn't find any other way to 
-        # force replacement of the mask area
-        pyopencv.subtract(faceROI, faceROI, faceROI, maskImgRe)
-        pyopencv.add(faceROI, overlayImgRe, faceROI, maskImgRe)
-        
-    pyopencv.imshow(mainWinName, img)
-    
-if __name__ == '__main__':
-    capture = pyopencv.VideoCapture()
-    frame = pyopencv.Mat()
-    
-    cascade = pyopencv.CascadeClassifier()
-
-    if not cascade.load( cascadeName ):
-        print("ERROR: Could not load classifier cascade")
-        sys.exit(-1)
-
-    capture.open(0)
-
-    pyopencv.namedWindow(mainWinName, pyopencv.CV_WINDOW_AUTOSIZE&1)
-
-    stImg = Image.open(stableImageName)
-    rotImg = Image.open(rotImageName)
-    # for some bug, the Image.im data is not loaded in open for pngs
-    stImg.load()
-    rotImg.load()
-    
-    # R,G,B,A -> A band
-    stBands = stImg.split()
-    rotBands = rotImg.split()
-    stAlpha = stBands[3]
-    rotAlpha = rotBands[3]
-    rotAngle = 0
-
-    tmpOffset = 0.1
-    imSz = stImg.size
-
-    maskImg = Image.new('L', stImg.size)
-    maskDraw = ImageDraw.Draw(maskImg)
-    maskDraw.ellipse((imSz[0]*tmpOffset, imSz[1]*tmpOffset, imSz[0]*(1-tmpOffset), imSz[1]*(1-tmpOffset)), 'white')
-    maskImg = ImageChops.lighter(ImageChops.lighter(maskImg, stAlpha), rotAlpha)
-
-    if capture.isOpened():
-        # this is just to optimise the memory consumption of the caching
-        # do not store the original, quite large pics, but smaller versions
-        inputHeight = capture.get(pyopencv.CV_CAP_PROP_FRAME_HEIGHT)
-        inputWidth = capture.get(pyopencv.CV_CAP_PROP_FRAME_WIDTH)
-
-        minDim = int(inputHeight)
-        if inputWidth<inputHeight:
-            minDim = int(inputWidth)
-
-        maskImg = maskImg.resize((minDim, minDim))
-        
-        # create empty list
-        imgCache = [[] for rIdx in range(360/rotReso)]
-
-        print "Press ESC to quit."
-
-        while True:
-            capture.retrieve(frame)
-            if frame.empty():
-                break
-
-            # since the basic image is the same whenever the rotation angle
-            # is the same, trade some memory for speed-up by caching.
-            # cache fill could be done before starting the other operations
-            # so that the initial slowing wouldn't be noticed, but this way
-            # operation starts immediately and it's possible to see the 
-            # benefit from caching
-            cacheIdx = rotAngle/rotReso
-            if len(imgCache[cacheIdx])<1:
-                print "Calculating the rotated image for angle %s." % rotAngle
-                # create the image to be drawn on face
-                # first, white circle background
-                combImg = Image.new('RGB', stImg.size)    
-                drawImg = ImageDraw.Draw(combImg)
-                drawImg.ellipse((imSz[0]*tmpOffset, imSz[1]*tmpOffset, imSz[0]*(1-tmpOffset), imSz[1]*(1-tmpOffset)), 'white')
-    
-                # then the rotated text and static image with alpha-based masks
-                tmpImg = Image.composite(stImg, Image.composite(rotImg.rotate(rotAngle, Image.NEAREST), combImg, rotAlpha.rotate(rotAngle, Image.NEAREST)), stAlpha)
-
-                tmpImg = tmpImg.resize((minDim, minDim))
-                imgCache[cacheIdx].append(tmpImg)
+    if len(faces) == 0:
+        if state.prev is not None:
+            px, py, pw, ph = state.prev
+            roi_cx = px + pw / 2.0
+            roi_cy = py + ph / 2.0
+            new_w = FADEOUT_LAMBDA * pw
+            new_h = FADEOUT_LAMBDA * ph
+            new_x = roi_cx - new_w / 2.0
+            new_y = roi_cy - new_h / 2.0
+            state.prev = (new_x, new_y, new_w, new_h)
+            ix, iy = int(round(new_x)), int(round(new_y))
+            iw, ih = int(round(new_w)), int(round(new_h))
+            if iw < FADEOUT_LIM or ih < FADEOUT_LIM:
+                state.prev = None
             else:
-                # retrieve a cached image
-                tmpImg = imgCache[cacheIdx][0]
+                r = (ix, iy, iw, ih)
+    else:
+        x, y, w, h = (int(v) for v in faces[0])
+        if state.prev is None:
+            state.prev = (float(x), float(y), float(w), float(h))
+            r = (x, y, w, h)
+        else:
+            px, py, pw, ph = state.prev
+            new_w = ROI_LAMBDA * pw + (1.0 - ROI_LAMBDA) * w * ROI_SCALER
+            new_h = ROI_LAMBDA * ph + (1.0 - ROI_LAMBDA) * h * ROI_SCALER
+            roi_cx = ROI_LAMBDA * (px + pw / 2.0) + (1.0 - ROI_LAMBDA) * (x + w / 2.0)
+            roi_cy = ROI_LAMBDA * (py + ph / 2.0) + (1.0 - ROI_LAMBDA) * (y + h / 2.0)
+            new_x = roi_cx - new_w / 2.0
+            new_y = roi_cy - new_h / 2.0
+            new_x, new_y, new_w, new_h = _clamp_roi(
+                new_x, new_y, new_w, new_h, frame_w, frame_h
+            )
+            state.prev = (new_x, new_y, new_w, new_h)
+            ix, iy = int(round(new_x)), int(round(new_y))
+            iw, ih = int(round(new_w)), int(round(new_h))
+            if iw < FADEOUT_LIM or ih < FADEOUT_LIM:
+                state.prev = None
+            else:
+                r = (ix, iy, iw, ih)
 
-            # find a face and draw the mask
-            detectAndDraw(frame, cascade, tmpImg, maskImg)
-            
-            # rotate the text
-            rotAngle = (rotAngle+rotReso)%360
-            if pyopencv.waitKey(keyWaitDelay) >= 0:
+    if r is None:
+        cv2.imshow(MAIN_WIN_NAME, frame)
+        return
+
+    rx, ry, rw, rh = r
+    face_roi = frame[ry : ry + rh, rx : rx + rw]
+    if face_roi.size == 0:
+        cv2.imshow(MAIN_WIN_NAME, frame)
+        return
+
+    ov = cv2.resize(overlay_rgb, (rw, rh), interpolation=cv2.INTER_LINEAR)
+    mk = cv2.resize(mask_l, (rw, rh), interpolation=cv2.INTER_LINEAR)
+
+    overlay_bgr = cv2.cvtColor(ov, cv2.COLOR_RGB2BGR).astype(np.float32)
+    mask_f = (mk.astype(np.float32) / 255.0)[..., np.newaxis]
+    base = face_roi.astype(np.float32)
+    blended = base * (1.0 - mask_f) + overlay_bgr * mask_f
+    face_roi[:] = np.clip(blended, 0, 255).astype(np.uint8)
+
+    cv2.imshow(MAIN_WIN_NAME, frame)
+
+
+def main() -> None:
+    """Run webcam capture with Laughing Man overlay."""
+    cascade_path = Path(cv2.data.haarcascades) / CASCADE_NAME
+    cascade = cv2.CascadeClassifier(str(cascade_path))
+    if cascade.empty():
+        print(f"ERROR: Could not load classifier cascade from {cascade_path}", file=sys.stderr)
+        sys.exit(1)
+
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("ERROR: Could not open camera 0", file=sys.stderr)
+        sys.exit(1)
+
+    cv2.namedWindow(MAIN_WIN_NAME, cv2.WINDOW_AUTOSIZE)
+
+    st_img = Image.open(STABLE_IMAGE_NAME)
+    rot_img = Image.open(ROT_IMAGE_NAME)
+    st_img.load()
+    rot_img.load()
+
+    st_bands = st_img.split()
+    rot_bands = rot_img.split()
+    st_alpha = st_bands[3]
+    rot_alpha = rot_bands[3]
+    rot_angle = 0
+
+    im_sz = st_img.size
+    mask_img = Image.new("L", st_img.size)
+    mask_draw = ImageDraw.Draw(mask_img)
+    mask_draw.ellipse(
+        (
+            im_sz[0] * TMP_OFFSET,
+            im_sz[1] * TMP_OFFSET,
+            im_sz[0] * (1 - TMP_OFFSET),
+            im_sz[1] * (1 - TMP_OFFSET),
+        ),
+        fill="white",
+    )
+    mask_img = ImageChops.lighter(ImageChops.lighter(mask_img, st_alpha), rot_alpha)
+
+    input_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    input_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    min_dim = min(input_h, input_w)
+    mask_img = mask_img.resize((min_dim, min_dim))
+
+    n_cache = 360 // ROT_RESO
+    img_cache: list[list[Image.Image]] = [[] for _ in range(n_cache)]
+
+    roi_state = RoiState()
+
+    print("Press any key in the window to quit.")
+
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None or frame.size == 0:
                 break
 
+            cache_idx = rot_angle // ROT_RESO
+            if not img_cache[cache_idx]:
+                print(f"Computing rotated overlay for angle {rot_angle}°.")
+                comb_img = Image.new("RGB", st_img.size)
+                draw_img = ImageDraw.Draw(comb_img)
+                draw_img.ellipse(
+                    (
+                        im_sz[0] * TMP_OFFSET,
+                        im_sz[1] * TMP_OFFSET,
+                        im_sz[0] * (1 - TMP_OFFSET),
+                        im_sz[1] * (1 - TMP_OFFSET),
+                    ),
+                    fill="white",
+                )
+                rot_nearest = rot_img.rotate(rot_angle, Image.Resampling.NEAREST)
+                rot_a_nearest = rot_alpha.rotate(rot_angle, Image.Resampling.NEAREST)
+                tmp_img = Image.composite(
+                    st_img,
+                    Image.composite(rot_nearest, comb_img, rot_a_nearest),
+                    st_alpha,
+                )
+                tmp_img = tmp_img.resize((min_dim, min_dim))
+                img_cache[cache_idx].append(tmp_img)
+            else:
+                tmp_img = img_cache[cache_idx][0]
+
+            overlay_rgb = np.asarray(tmp_img.convert("RGB"))
+            mask_l = np.asarray(mask_img)
+
+            detect_and_draw(frame, cascade, overlay_rgb, mask_l, roi_state)
+
+            rot_angle = (rot_angle + ROT_RESO) % 360
+            if cv2.waitKey(KEY_WAIT_DELAY_MS) >= 0:
+                break
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
