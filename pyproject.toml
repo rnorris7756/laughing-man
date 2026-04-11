@@ -1,9 +1,15 @@
 [project]
 name = "laughing-man"
 version = "0.1.0"
-description = "Webcam Laughing Man face overlay (OpenCV + Pillow)"
+description = "Webcam Laughing Man face overlay (MediaPipe + OpenCV + Pillow)"
 requires-python = ">=3.10"
 dependencies = [
-    "opencv-python>=4.13.0.92",
+    "mediapipe>=0.10.33",
     "pillow>=12.2.0",
 ]
+
+# uv defaults to hardlinks from its cache; when cache and .venv are on different
+# devices, that can fail silently and leave broken wheels (e.g. cv2 without
+# VideoCapture). Copying avoids incomplete OpenCV installs.
+[tool.uv]
+link-mode = "copy"
