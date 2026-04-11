@@ -10,6 +10,7 @@ import typer
 from laughing_man.constants import (
     DEFAULT_NO_FACE_BLUR_FRAMES,
     DEFAULT_ROI_LAMBDA,
+    DEFAULT_ROI_MOTION,
     DEFAULT_SIZE_LAMBDA,
 )
 from laughing_man.logging_setup import configure_logging
@@ -152,6 +153,17 @@ def main(
             "if needed. Zero disables. Ignored for blaze (BlazeFace VIDEO mode)."
         ),
     ),
+    roi_motion: Literal["ema", "kalman", "kalman_flow"] = typer.Option(
+        DEFAULT_ROI_MOTION,
+        "--roi-motion",
+        help=(
+            "How to stabilize the face box over time: ema = exponential moving "
+            "average (--roi-lambda / --size-lambda); kalman = constant-velocity Kalman "
+            "filter on center and size; kalman_flow = Kalman plus LK optical flow to "
+            "blend the measured center toward frame-to-frame motion. "
+            "For kalman modes, lambda tuning mostly affects EMA only (not used)."
+        ),
+    ),
 ) -> None:
     """Run the Laughing Man webcam overlay."""
     configure_logging(debug=debug)
@@ -169,6 +181,7 @@ def main(
         overlay_scale=overlay_scale,
         face_backend=face_backend,
         cascade_margin=cascade_margin,
+        roi_motion=roi_motion,
     )
 
 

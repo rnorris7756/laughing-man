@@ -21,6 +21,7 @@ from laughing_man.camera import open_webcam
 from laughing_man.cascade import CascadedFaceBoxSource
 from laughing_man.constants import (
     CAMERA_INDEX,
+    DEFAULT_ROI_MOTION,
     KEY_WAIT_DELAY_MS,
     LAMBDA_TUNE_STEP,
     MAIN_WIN_NAME,
@@ -66,6 +67,7 @@ def run_overlay(
     overlay_scale: float,
     face_backend: Literal["blaze", "yunet"] = "blaze",
     cascade_margin: float = 0.0,
+    roi_motion: Literal["ema", "kalman", "kalman_flow"] = DEFAULT_ROI_MOTION,
 ) -> None:
     """
     Run webcam capture with Laughing Man overlay.
@@ -106,6 +108,9 @@ def run_overlay(
         ``blaze`` (MediaPipe BlazeFace) or ``yunet`` (OpenCV YuNet ONNX).
     cascade_margin
         YuNet only: crop expansion for cascade detection (see ``--cascade-margin``).
+    roi_motion
+        Temporal model for the face box: ``ema``, ``kalman``, or ``kalman_flow``
+        (see ``--roi-motion``).
     """
     if not virtual_cam and not show_preview:
         logger.error(
@@ -260,6 +265,8 @@ def run_overlay(
         vcam: pyvirtualcam.Camera | None,
     ) -> None:
         nonlocal rot_angle, last_raw_face, roi_lambda_live, size_lambda_live
+        if roi_motion != "ema":
+            logger.info("ROI motion model: {}", roi_motion)
         prefill_thread.join()
         if prefill_exc:
             e = prefill_exc[0]
@@ -347,6 +354,7 @@ def run_overlay(
                         no_face_blur_frames=no_face_blur_frames,
                         show_preview=show_preview,
                         overlay_scale=overlay_scale,
+                        roi_motion=roi_motion,
                     )
 
                     if vcam is not None:

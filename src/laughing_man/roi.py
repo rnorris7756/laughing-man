@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import cv2
 import numpy as np
 
+from laughing_man.box_tracking import BoxKalman, optical_flow_center_shift
 from laughing_man.constants import (
     FADEOUT_LIM,
+    FLOW_CENTER_MIX,
+    KALMAN_MEASUREMENT_NOISE,
+    KALMAN_PROCESS_NOISE,
     MAIN_WIN_NAME,
     OVERLAY_VERTICAL_SHIFT,
     ROI_SCALER,
@@ -23,6 +28,8 @@ class RoiState:
     prev: tuple[float, float, float, float] | None = None
     last_face_h: float | None = None
     no_face_streak: int = 0
+    kalman: BoxKalman | None = None
+    prev_gray: np.ndarray | None = None
 
 
 def blend_detection_centers(
@@ -130,6 +137,13 @@ def resize_overlay_to_face_roi(
     return ov_pad, mk_pad
 
 
+def _clear_roi_tracking(state: RoiState) -> None:
+    state.prev = None
+    state.last_face_h = None
+    state.kalman = None
+    state.prev_gray = None
+
+
 def smooth_and_draw(
     frame: np.ndarray,
     raw_face: tuple[int, int, int, int] | None,
@@ -143,6 +157,7 @@ def smooth_and_draw(
     no_face_blur_frames: int,
     show_preview: bool,
     overlay_scale: float,
+    roi_motion: Literal["ema", "kalman", "kalman_flow"] = "ema",
 ) -> None:
     """
     Apply full-frame privacy effect after consecutive no-face frames, temporal
@@ -178,6 +193,11 @@ def smooth_and_draw(
         Resize the overlay relative to the face ROI before blending (see
         ``--scale``). ``1.0`` preserves the previous mapping from the square cache
         to the face box.
+    roi_motion
+        ``ema`` — exponential moving average (``--roi-lambda`` / ``--size-lambda``).
+        ``kalman`` — constant-velocity Kalman on ``(cx, cy, w, h)``.
+        ``kalman_flow`` — Kalman with sparse LK optical flow to blend the measured
+        center toward motion from the previous frame.
     """
     frame_h, frame_w = frame.shape[:2]
 
@@ -191,70 +211,124 @@ def smooth_and_draw(
 
     r: tuple[int, int, int, int] | None = None
 
-    if raw_face is not None:
-        x, y, w, h = raw_face
-        face_h = float(h)
-        state.last_face_h = face_h
-        y_shift = OVERLAY_VERTICAL_SHIFT * face_h
-        if state.prev is None:
-            sy = float(y) - y_shift
-            state.prev = (float(x), sy, float(w), float(h))
-            r = (x, int(round(sy)), w, h)
-        else:
-            px, py, pw, ph = state.prev
-            w_det = w * ROI_SCALER
-            h_det = h * ROI_SCALER
-            new_w = size_lambda * pw + (1.0 - size_lambda) * w_det
-            new_h = size_lambda * ph + (1.0 - size_lambda) * h_det
-            prev_cx = px + pw / 2.0
-            prev_cy = py + ph / 2.0
+    try:
+        if raw_face is not None:
+            x, y, w, h = raw_face
+            face_h = float(h)
+            state.last_face_h = face_h
+            y_shift = OVERLAY_VERTICAL_SHIFT * face_h
             det_cx = float(x) + float(w) / 2.0
             det_cy = float(y) + float(h) / 2.0
-            roi_cx, roi_cy = blend_detection_centers(
-                prev_cx, prev_cy, det_cx, det_cy, center_lambda
-            )
-            new_x = roi_cx - new_w / 2.0
-            new_y = roi_cy - new_h / 2.0 - y_shift
-            new_x, new_y, new_w, new_h = clamp_roi(
-                new_x, new_y, new_w, new_h, frame_w, frame_h
-            )
-            state.prev = (new_x, new_y, new_w, new_h)
+            w_det = float(w) * ROI_SCALER
+            h_det = float(h) * ROI_SCALER
+
+            if roi_motion == "ema":
+                if state.prev is None:
+                    sy = float(y) - y_shift
+                    state.prev = (float(x), sy, float(w), float(h))
+                    r = (x, int(round(sy)), w, h)
+                else:
+                    px, py, pw, ph = state.prev
+                    new_w = size_lambda * pw + (1.0 - size_lambda) * w_det
+                    new_h = size_lambda * ph + (1.0 - size_lambda) * h_det
+                    prev_cx = px + pw / 2.0
+                    prev_cy = py + ph / 2.0
+                    roi_cx, roi_cy = blend_detection_centers(
+                        prev_cx, prev_cy, det_cx, det_cy, center_lambda
+                    )
+                    new_x = roi_cx - new_w / 2.0
+                    new_y = roi_cy - new_h / 2.0 - y_shift
+                    new_x, new_y, new_w, new_h = clamp_roi(
+                        new_x, new_y, new_w, new_h, frame_w, frame_h
+                    )
+                    state.prev = (new_x, new_y, new_w, new_h)
+                    ix, iy = int(round(new_x)), int(round(new_y))
+                    iw, ih = int(round(new_w)), int(round(new_h))
+                    if iw < FADEOUT_LIM or ih < FADEOUT_LIM:
+                        _clear_roi_tracking(state)
+                    else:
+                        r = (ix, iy, iw, ih)
+
+            else:
+                if state.kalman is None:
+                    state.kalman = BoxKalman(
+                        process_noise=KALMAN_PROCESS_NOISE,
+                        measurement_noise=KALMAN_MEASUREMENT_NOISE,
+                    )
+
+                meas_cx = det_cx
+                meas_cy = det_cy
+                if (
+                    roi_motion == "kalman_flow"
+                    and state.prev_gray is not None
+                    and state.prev is not None
+                ):
+                    cur_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    px, py, pw, ph = state.prev
+                    shift = optical_flow_center_shift(
+                        state.prev_gray,
+                        cur_gray,
+                        px,
+                        py,
+                        pw,
+                        ph,
+                    )
+                    if shift is not None:
+                        dx, dy = shift
+                        prev_cx = px + pw / 2.0
+                        prev_cy = py + ph / 2.0
+                        mix = FLOW_CENTER_MIX
+                        meas_cx = (1.0 - mix) * det_cx + mix * (prev_cx + dx)
+                        meas_cy = (1.0 - mix) * det_cy + mix * (prev_cy + dy)
+
+                z = np.array([meas_cx, meas_cy, w_det, h_det], dtype=np.float64)
+                cx, cy, kw, kh = state.kalman.update(z)
+                new_x = float(cx) - kw / 2.0
+                new_y = float(cy) - kh / 2.0 - y_shift
+                new_x, new_y, new_w, new_h = clamp_roi(
+                    new_x, new_y, float(kw), float(kh), frame_w, frame_h
+                )
+                state.prev = (new_x, new_y, new_w, new_h)
+                ix, iy = int(round(new_x)), int(round(new_y))
+                iw, ih = int(round(new_w)), int(round(new_h))
+                if iw < FADEOUT_LIM or ih < FADEOUT_LIM:
+                    _clear_roi_tracking(state)
+                else:
+                    r = (ix, iy, iw, ih)
+
+        elif not apply_privacy and state.prev is not None:
+            px, py, pw, ph = state.prev
+            new_x, new_y, new_w, new_h = clamp_roi(px, py, pw, ph, frame_w, frame_h)
             ix, iy = int(round(new_x)), int(round(new_y))
             iw, ih = int(round(new_w)), int(round(new_h))
-            if iw < FADEOUT_LIM or ih < FADEOUT_LIM:
-                state.prev = None
-                state.last_face_h = None
-            else:
+            if iw >= FADEOUT_LIM and ih >= FADEOUT_LIM:
                 r = (ix, iy, iw, ih)
 
-    elif not apply_privacy and state.prev is not None:
-        px, py, pw, ph = state.prev
-        new_x, new_y, new_w, new_h = clamp_roi(px, py, pw, ph, frame_w, frame_h)
-        ix, iy = int(round(new_x)), int(round(new_y))
-        iw, ih = int(round(new_w)), int(round(new_h))
-        if iw >= FADEOUT_LIM and ih >= FADEOUT_LIM:
-            r = (ix, iy, iw, ih)
+        if r is None:
+            if show_preview:
+                cv2.imshow(MAIN_WIN_NAME, frame)
+            return
 
-    if r is None:
+        rx, ry, rw, rh = r
+        face_roi = frame[ry : ry + rh, rx : rx + rw]
+        if face_roi.size == 0:
+            if show_preview:
+                cv2.imshow(MAIN_WIN_NAME, frame)
+            return
+
+        ah, aw = face_roi.shape[:2]
+        ov, mk = resize_overlay_to_face_roi(overlay_rgb, mask_l, aw, ah, overlay_scale)
+
+        overlay_bgr = cv2.cvtColor(ov, cv2.COLOR_RGB2BGR).astype(np.float32)
+        mask_f = (mk.astype(np.float32) / 255.0)[..., np.newaxis]
+        base = face_roi.astype(np.float32)
+        blended = base * (1.0 - mask_f) + overlay_bgr * mask_f
+        face_roi[:] = np.clip(blended, 0, 255).astype(np.uint8)
+
         if show_preview:
             cv2.imshow(MAIN_WIN_NAME, frame)
-        return
-
-    rx, ry, rw, rh = r
-    face_roi = frame[ry : ry + rh, rx : rx + rw]
-    if face_roi.size == 0:
-        if show_preview:
-            cv2.imshow(MAIN_WIN_NAME, frame)
-        return
-
-    ah, aw = face_roi.shape[:2]
-    ov, mk = resize_overlay_to_face_roi(overlay_rgb, mask_l, aw, ah, overlay_scale)
-
-    overlay_bgr = cv2.cvtColor(ov, cv2.COLOR_RGB2BGR).astype(np.float32)
-    mask_f = (mk.astype(np.float32) / 255.0)[..., np.newaxis]
-    base = face_roi.astype(np.float32)
-    blended = base * (1.0 - mask_f) + overlay_bgr * mask_f
-    face_roi[:] = np.clip(blended, 0, 255).astype(np.uint8)
-
-    if show_preview:
-        cv2.imshow(MAIN_WIN_NAME, frame)
+    finally:
+        if roi_motion == "kalman_flow":
+            state.prev_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).copy()
+        elif state.prev_gray is not None:
+            state.prev_gray = None
