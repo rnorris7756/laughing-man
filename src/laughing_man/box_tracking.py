@@ -140,7 +140,7 @@ def optical_flow_center_shift(
     pts = np.array([[xv, yv] for yv in ys for xv in xs], dtype=np.float32)
     p0 = pts.reshape(-1, 1, 2)
 
-    p1, st, _ = cv2.calcOpticalFlowPyrLK(
+    p1, st, _ = cv2.calcOpticalFlowPyrLK(  # ty: ignore[no-matching-overload]
         roi_prev,
         roi_cur,
         p0,

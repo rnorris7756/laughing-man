@@ -69,9 +69,7 @@ def ensure_yunet_model(path: Path, url: str | None) -> None:
 
 def default_model_path(full_range: bool) -> Path:
     """Default cache path for the bundled BlazeFace variant."""
-    name = (
-        "blaze_face_full_range.tflite" if full_range else "blaze_face_short_range.tflite"
-    )
+    name = "blaze_face_full_range.tflite" if full_range else "blaze_face_short_range.tflite"
     return cache_dir() / name
 
 

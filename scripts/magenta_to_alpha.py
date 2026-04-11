@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import cv2
 import numpy as np
@@ -82,9 +82,7 @@ def infer_key_rgb_from_corner_patches(
     qs = max(1, int(quantize_step))
     q = (pix.astype(np.int32) // qs) * qs
     q = np.clip(q, 0, 255).astype(np.uint8)
-    packed = (
-        q[:, 0].astype(np.uint32) << 16 | q[:, 1].astype(np.uint32) << 8 | q[:, 2].astype(np.uint32)
-    )
+    packed = q[:, 0].astype(np.uint32) << 16 | q[:, 1].astype(np.uint32) << 8 | q[:, 2].astype(np.uint32)
     uniq, counts = np.unique(packed, return_counts=True)
     winner = int(uniq[np.argmax(counts)])
     r = (winner >> 16) & 255
@@ -137,7 +135,7 @@ def chroma_key_hsv(
     """
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
-    key_px = np.uint8([[[key_rgb[0], key_rgb[1], key_rgb[2]]]])
+    key_px = np.array([[[key_rgb[0], key_rgb[1], key_rgb[2]]]], dtype=np.uint8)
     k_bgr = cv2.cvtColor(key_px, cv2.COLOR_RGB2BGR)
     k_hsv = cv2.cvtColor(k_bgr, cv2.COLOR_BGR2HSV)[0, 0].astype(np.float32)
     kh, ks, kv = float(k_hsv[0]), float(k_hsv[1]), float(k_hsv[2])
@@ -326,10 +324,11 @@ def main(
         err=True,
     )
 
+    method_lit = cast(Literal["hsv", "rgb-euclidean", "rgb-box"], m)
     rgba = chroma_key_image(
         img,
         key_rgb=key_rgb,
-        method=m,  # type: ignore[arg-type]
+        method=method_lit,
         hsv_distance=distance,
         rgb_euclidean_distance=rgb_distance,
         box_tolerance=tolerance,

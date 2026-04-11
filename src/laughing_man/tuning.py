@@ -11,12 +11,12 @@ from typing import Callable
 from loguru import logger
 
 from laughing_man.constants import (
-    LAMBDA_TUNE_STEP,
     _ARROW_KEYS_ROI_DOWN,
     _ARROW_KEYS_ROI_UP,
     _ARROW_KEYS_SIZE_LEFT,
     _ARROW_KEYS_SIZE_RIGHT,
     _QUIT_PREVIEW_KEY_CODES,
+    LAMBDA_TUNE_STEP,
 )
 
 
@@ -162,10 +162,10 @@ def windows_console_tune_loop(
     import msvcrt
 
     while not listener_stop.is_set():
-        if msvcrt.kbhit():
-            c = msvcrt.getch()
+        if msvcrt.kbhit():  # type: ignore[attr-defined]
+            c = msvcrt.getch()  # type: ignore[attr-defined]
             if c in (b"\xe0", b"\x00"):
-                c2 = msvcrt.getch()
+                c2 = msvcrt.getch()  # type: ignore[attr-defined]
                 if c2 == b"H":
                     apply_deltas(LAMBDA_TUNE_STEP, 0.0)
                 elif c2 == b"P":

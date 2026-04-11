@@ -15,9 +15,7 @@ class _FixedBoxSource:
     def __init__(self, box: tuple[int, int, int, int] | None) -> None:
         self._box = box
 
-    def face_box(
-        self, frame: np.ndarray, timestamp_ms: int
-    ) -> tuple[int, int, int, int] | None:
+    def face_box(self, frame: np.ndarray, timestamp_ms: int) -> tuple[int, int, int, int] | None:
         return self._box
 
 
