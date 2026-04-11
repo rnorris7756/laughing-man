@@ -8,9 +8,9 @@ from typing import Any
 
 import typer
 from loguru import logger
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
-from laughing_man.constants import ROT_IMAGE_NAME, STABLE_IMAGE_NAME
+from laughing_man.constants import ROT_IMAGE_NAME, ROT_RESO, STABLE_IMAGE_NAME, TMP_OFFSET
 
 
 def build_rotated_overlay_frame(
@@ -134,3 +134,114 @@ def _load_bundled_rgba(path: Any) -> Image.Image:
         img = Image.open(f).convert("RGBA")
     img.load()
     return img
+
+
+def make_overlay_mask_resized(
+    overlay_image: Path | None,
+    st_img: Image.Image,
+    rot_img: Image.Image,
+    min_dim: int,
+) -> Image.Image:
+    """
+    Build the single-channel mask used for alpha blending, sized to ``min_dim``.
+
+    Mirrors the mask construction in the live overlay loop (ellipse + bundled
+    layers vs custom ``--image`` art).
+
+    Parameters
+    ----------
+    overlay_image
+        Optional user overlay path (same semantics as :func:`load_overlay_images`).
+    st_img, rot_img
+        RGBA layers from :func:`load_overlay_images`.
+    min_dim
+        Square edge length matching ``min(frame height, frame width)``.
+
+    Returns
+    -------
+    Image.Image
+        ``L`` mode image of shape ``(min_dim, min_dim)``.
+    """
+    st_bands = st_img.split()
+    rot_bands = rot_img.split()
+    st_alpha = st_bands[3]
+    rot_alpha = rot_bands[3]
+    im_sz = st_img.size
+    if overlay_image is not None:
+        mask_img = ImageChops.lighter(st_alpha, rot_alpha)
+    else:
+        mask_img = Image.new("L", st_img.size)
+        mask_draw = ImageDraw.Draw(mask_img)
+        mask_draw.ellipse(
+            (
+                im_sz[0] * TMP_OFFSET,
+                im_sz[1] * TMP_OFFSET,
+                im_sz[0] * (1 - TMP_OFFSET),
+                im_sz[1] * (1 - TMP_OFFSET),
+            ),
+            fill="white",
+        )
+        mask_img = ImageChops.lighter(ImageChops.lighter(mask_img, st_alpha), rot_alpha)
+    return mask_img.resize((min_dim, min_dim))
+
+
+def prefill_rotated_overlay_cache_inplace(
+    img_cache: list[list[Image.Image]],
+    *,
+    overlay_image: Path | None,
+    st_img: Image.Image,
+    rot_img: Image.Image,
+    min_dim: int,
+) -> None:
+    """
+    Fill ``img_cache`` with one composited RGB frame per discrete rotation step.
+
+    Parameters
+    ----------
+    img_cache
+        Length ``360 // ROT_RESO``; each entry is a single-element list to match
+        the live webcam loop layout.
+    overlay_image
+        Optional user overlay path (same semantics as :func:`load_overlay_images`).
+    st_img, rot_img
+        RGBA layers from :func:`load_overlay_images`.
+    min_dim
+        Square edge length for each cached frame.
+    """
+    st_bands = st_img.split()
+    rot_bands = rot_img.split()
+    st_alpha = st_bands[3]
+    rot_alpha = rot_bands[3]
+    im_sz = st_img.size
+    n_cache = len(img_cache)
+    custom_static = overlay_image is not None
+    if custom_static:
+        shared = build_rotated_overlay_frame(
+            rot_angle=0,
+            st_img=st_img,
+            st_alpha=st_alpha,
+            rot_img=rot_img,
+            rot_alpha=rot_alpha,
+            im_sz=im_sz,
+            tmp_offset=TMP_OFFSET,
+            min_dim=min_dim,
+            custom_static_overlay=True,
+        )
+        for i in range(n_cache):
+            img_cache[i].append(shared)
+        return
+    for i in range(n_cache):
+        angle = i * ROT_RESO
+        img_cache[i].append(
+            build_rotated_overlay_frame(
+                rot_angle=angle,
+                st_img=st_img,
+                st_alpha=st_alpha,
+                rot_img=rot_img,
+                rot_alpha=rot_alpha,
+                im_sz=im_sz,
+                tmp_offset=TMP_OFFSET,
+                min_dim=min_dim,
+                custom_static_overlay=False,
+            )
+        )

@@ -14,7 +14,7 @@ import pyvirtualcam
 import typer
 from loguru import logger
 from mediapipe.tasks.python import vision
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image
 from pyvirtualcam import PixelFormat
 
 from laughing_man.camera import open_webcam
@@ -26,7 +26,6 @@ from laughing_man.constants import (
     LAMBDA_TUNE_STEP,
     MAIN_WIN_NAME,
     ROT_RESO,
-    TMP_OFFSET,
 )
 from laughing_man.deps import PipelineDeps
 from laughing_man.detection import (
@@ -39,7 +38,11 @@ from laughing_man.model import (
     resolve_model,
     resolve_yunet_model,
 )
-from laughing_man.overlay import build_rotated_overlay_frame, load_overlay_images
+from laughing_man.overlay import (
+    load_overlay_images,
+    make_overlay_mask_resized,
+    prefill_rotated_overlay_cache_inplace,
+)
 from laughing_man.privacy import GaussianBlurPrivacy
 from laughing_man.protocols import FaceBoxSource
 from laughing_man.roi import RoiState, smooth_and_draw
@@ -125,28 +128,7 @@ def run_overlay(
 
     st_img, rot_img = load_overlay_images(overlay_image)
 
-    st_bands = st_img.split()
-    rot_bands = rot_img.split()
-    st_alpha = st_bands[3]
-    rot_alpha = rot_bands[3]
     rot_angle = 0
-
-    im_sz = st_img.size
-    if overlay_image is not None:
-        mask_img = ImageChops.lighter(st_alpha, rot_alpha)
-    else:
-        mask_img = Image.new("L", st_img.size)
-        mask_draw = ImageDraw.Draw(mask_img)
-        mask_draw.ellipse(
-            (
-                im_sz[0] * TMP_OFFSET,
-                im_sz[1] * TMP_OFFSET,
-                im_sz[0] * (1 - TMP_OFFSET),
-                im_sz[1] * (1 - TMP_OFFSET),
-            ),
-            fill="white",
-        )
-        mask_img = ImageChops.lighter(ImageChops.lighter(mask_img, st_alpha), rot_alpha)
 
     input_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     input_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -196,7 +178,7 @@ def run_overlay(
     cap_fps = float(cap.get(cv2.CAP_PROP_FPS))
     stream_fps = virtual_fps if virtual_fps > 0 else (cap_fps if cap_fps > 0 else 30.0)
     min_dim = min(input_h, input_w)
-    mask_img = mask_img.resize((min_dim, min_dim))
+    mask_img = make_overlay_mask_resized(overlay_image, st_img, rot_img, min_dim)
 
     n_cache = 360 // ROT_RESO
     img_cache: list[list[Image.Image]] = [[] for _ in range(n_cache)]
@@ -206,36 +188,13 @@ def run_overlay(
     def _prefill_rotated_overlay_cache() -> None:
         """Fill ``img_cache`` for all discrete rotation steps (runs in a helper thread)."""
         try:
-            if overlay_image is not None:
-                shared = build_rotated_overlay_frame(
-                    rot_angle=0,
-                    st_img=st_img,
-                    st_alpha=st_alpha,
-                    rot_img=rot_img,
-                    rot_alpha=rot_alpha,
-                    im_sz=im_sz,
-                    tmp_offset=TMP_OFFSET,
-                    min_dim=min_dim,
-                    custom_static_overlay=True,
-                )
-                for i in range(n_cache):
-                    img_cache[i].append(shared)
-            else:
-                for i in range(n_cache):
-                    angle = i * ROT_RESO
-                    img_cache[i].append(
-                        build_rotated_overlay_frame(
-                            rot_angle=angle,
-                            st_img=st_img,
-                            st_alpha=st_alpha,
-                            rot_img=rot_img,
-                            rot_alpha=rot_alpha,
-                            im_sz=im_sz,
-                            tmp_offset=TMP_OFFSET,
-                            min_dim=min_dim,
-                            custom_static_overlay=False,
-                        )
-                    )
+            prefill_rotated_overlay_cache_inplace(
+                img_cache,
+                overlay_image=overlay_image,
+                st_img=st_img,
+                rot_img=rot_img,
+                min_dim=min_dim,
+            )
         except BaseException as e:
             prefill_exc.append(e)
 
