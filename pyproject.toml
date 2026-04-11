@@ -31,4 +31,28 @@ link-mode = "copy"
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "ruff>=0.15.10",
+    "ty>=0.0.29",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+# Core correctness + import order. Typer CLIs intentionally use ``Option``/``Argument``
+# in defaults (ruff B008); avoid stylistic rules that fight framework patterns.
+select = ["E", "F", "I"]
+
+[tool.ty]
+# Enables project discovery; see https://docs.astral.sh/ty/configuration/
+
+[tool.ty.environment]
+# Match `requires-python` lower bound so stdlib and syntax checks align with support.
+python-version = "3.10"
+# Code uses platform-specific branches (e.g. ``msvcrt`` on Windows).
+python-platform = "all"
+
+[tool.ty.src]
+include = ["src", "tests", "scripts"]
