@@ -45,6 +45,8 @@ MIN_SUPPRESSION_THRESHOLD = 0.3
 
 ROT_RESO = 5
 DEFAULT_ROI_LAMBDA = 0.35
+# Stronger low-pass on w/h than on center: bbox size jitters more than real head size.
+DEFAULT_SIZE_LAMBDA = 0.65
 DEFAULT_FADEOUT_LAMBDA = 0.99
 FADEOUT_LIM = 50
 ROI_SCALER = 1.3
@@ -200,7 +202,8 @@ def smooth_and_draw(
     overlay_rgb: np.ndarray,
     mask_l: np.ndarray,
     *,
-    roi_lambda: float,
+    center_lambda: float,
+    size_lambda: float,
     fadeout_lambda: float,
 ) -> None:
     """
@@ -218,8 +221,11 @@ def smooth_and_draw(
         RGB uint8 image, same size as the face ROI when drawn.
     mask_l
         Single-channel uint8 mask (0–255), same spatial size as ``overlay_rgb``.
-    roi_lambda
-        Low-pass on the box when a face is present (0 = snap to raw detection).
+    center_lambda
+        Low-pass on the **center** of the box (higher = stickier position).
+    size_lambda
+        Low-pass on **width and height** (higher = less size jitter from the
+        detector; use greater than ``center_lambda`` when the box size flickers).
     fadeout_lambda
         Shrink factor per frame when no face is seen.
     """
@@ -250,10 +256,16 @@ def smooth_and_draw(
             r = (x, y, w, h)
         else:
             px, py, pw, ph = state.prev
-            new_w = roi_lambda * pw + (1.0 - roi_lambda) * w * ROI_SCALER
-            new_h = roi_lambda * ph + (1.0 - roi_lambda) * h * ROI_SCALER
-            roi_cx = roi_lambda * (px + pw / 2.0) + (1.0 - roi_lambda) * (x + w / 2.0)
-            roi_cy = roi_lambda * (py + ph / 2.0) + (1.0 - roi_lambda) * (y + h / 2.0)
+            w_det = w * ROI_SCALER
+            h_det = h * ROI_SCALER
+            new_w = size_lambda * pw + (1.0 - size_lambda) * w_det
+            new_h = size_lambda * ph + (1.0 - size_lambda) * h_det
+            roi_cx = center_lambda * (px + pw / 2.0) + (1.0 - center_lambda) * (
+                x + w / 2.0
+            )
+            roi_cy = center_lambda * (py + ph / 2.0) + (1.0 - center_lambda) * (
+                y + h / 2.0
+            )
             new_x = roi_cx - new_w / 2.0
             new_y = roi_cy - new_h / 2.0
             new_x, new_y, new_w, new_h = _clamp_roi(
@@ -316,6 +328,7 @@ def run_overlay(
     use_gpu: bool,
     detect_interval: int,
     roi_lambda: float,
+    size_lambda: float,
     fadeout_lambda: float,
 ) -> None:
     """
@@ -334,7 +347,9 @@ def run_overlay(
         reduce CPU/GPU load but reuse the last detection between runs, which
         can increase perceived lag.
     roi_lambda
-        Temporal smoothing when a face is visible (0 = follow raw detections).
+        Temporal smoothing for the **center** of the overlay (0 = snap to raw).
+    size_lambda
+        Temporal smoothing for **box width/height** (reduces detector size jitter).
     fadeout_lambda
         Shrink rate for the box when the face is lost.
     """
@@ -472,7 +487,8 @@ def run_overlay(
                         roi_state,
                         overlay_rgb,
                         mask_l,
-                        roi_lambda=roi_lambda,
+                        center_lambda=roi_lambda,
+                        size_lambda=size_lambda,
                         fadeout_lambda=fadeout_lambda,
                     )
 
@@ -523,10 +539,20 @@ def main(
         min=0.0,
         max=1.0,
         help=(
-            "How much to blend the previous overlay box with the new detection "
-            "(0 = snap to raw detections, less lag; 1 = never move—unusable). "
-            "Default follows the original demo (~0.95), which feels smooth but lags "
-            "when you move quickly."
+            "Low-pass on the overlay **center** vs the detected face center "
+            "(0 = snap; higher = stickier). Does not control box size; see "
+            "--size-lambda."
+        ),
+    ),
+    size_lambda: float = typer.Option(
+        DEFAULT_SIZE_LAMBDA,
+        "--size-lambda",
+        min=0.0,
+        max=1.0,
+        help=(
+            "Low-pass on overlay **width/height** vs the detector box (higher = "
+            "less size jitter when pose changes). Typically higher than "
+            "--roi-lambda because bbox size fluctuates more than real head size."
         ),
     ),
     fadeout_lambda: float = typer.Option(
@@ -543,6 +569,7 @@ def main(
         use_gpu=gpu,
         detect_interval=detect_interval,
         roi_lambda=roi_lambda,
+        size_lambda=size_lambda,
         fadeout_lambda=fadeout_lambda,
     )
 
