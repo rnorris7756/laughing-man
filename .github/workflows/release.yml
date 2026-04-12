@@ -44,9 +44,9 @@ jobs:
           set -e
           if [ "$code" -eq 0 ]; then
             echo "bumped=true" >> "$GITHUB_OUTPUT"
-          elif [ "$code" -eq 3 ]; then
+          elif [ "$code" -eq 3 ] || [ "$code" -eq 21 ]; then
             echo "bumped=false" >> "$GITHUB_OUTPUT"
-            echo "No conventional commits to release; skipping build and push."
+            echo "No release: no new commits (exit 3), or commits are not bump-eligible types like feat/fix (exit 21, e.g. docs/ci/chore only). Skipping build and push."
           else
             exit "$code"
           fi
