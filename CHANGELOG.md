@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v1.1.0 (2026-04-12)
 
-<!-- Release notes are generated automatically by Commitizen on each release. -->
+### Feat
+
+- **release**: set version 1.0.0 and run commitizen in CI
+- **cli**: add postprocess command for offline image/video overlay
+- custom overlay image, scale, and chroma-key helper
+- **overlay**: terminal lambda tuning, roi horizontal smoothing, defaults
+
+### Fix
+
+- **ci**: skip release when commits are not bump-eligible (e.g. docs/ci)
+- satisfy ruff and ty checks across source and scripts
