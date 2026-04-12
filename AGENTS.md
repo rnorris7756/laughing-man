@@ -51,6 +51,15 @@ Common **types:** `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `b
 - `fix(overlay): correct alpha compositing on custom images`
 - `chore(dev): add ruff and ty for lint and type checking`
 
+**Choosing a type (especially for agents):**
+
+- **`feat`** — a **user-facing** change to what the installed package does (CLI behavior, overlay, defaults, public API). If the change only affects **developers** or **automation**, it is not a `feat`.
+- **`fix`** — corrects broken **user-facing** behavior (or a security issue). Internal-only test or tooling fixes often belong in **`test`** or **`chore`**.
+- **`chore`** — maintenance that does not add user-visible product behavior: dev dependencies, pre-commit, editor settings, refactors with no API change, housekeeping. Use **`chore(dev)`** when the scope is developer workflow.
+- **`ci`** — CI workflow or job definitions. **`build`** — packaging, build backends, release tooling. **`docs`** — README, AGENTS, user-facing documentation.
+
+Do **not** use `feat(dev)` for pre-commit hooks, lint rules, or “DX” that does not change the application for end users; prefer **`chore(dev)`**, **`ci`**, or **`build`** depending on what you touched.
+
 ## Planning work and commits
 
 When planning a change set, **sketch the commits in advance**: what each commit will contain and its conventional message. That reduces the risk of **partial-file staging** (`git add -p` or staging only some hunks) mixing unrelated edits in the same file, which is easy to get wrong and produces confusing history.
