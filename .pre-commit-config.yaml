@@ -1,0 +1,13 @@
+# Ruff and ty run through `uv run --locked` so versions match CI (see uv.lock).
+default_install_hook_types: [pre-commit]
+
+repos:
+  - repo: local
+    hooks:
+      # One process: parallel hooks each spawned `uv run` and could race on `.venv` (e.g. NFS).
+      - id: ruff-and-ty
+        name: ruff + ty (uv lockfile)
+        entry: uv run --locked bash -ec 'ruff check src tests scripts && ruff format --check src tests scripts && ty check'
+        language: system
+        pass_filenames: false
+        always_run: true
