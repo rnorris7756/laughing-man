@@ -33,8 +33,12 @@ jobs:
         run: |
           uv run --locked cz check --rev-range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
-      - name: Lint (pre-commit: ruff + ty)
-        run: uv run --locked pre-commit run --all-files
+      - name: "Lint (pre-commit: ruff + ty)"
+        run: uv run --locked pre-commit run ruff-and-ty --all-files
+
+      - name: "Lint GitHub Actions (actionlint)"
+        if: github.event_name == 'pull_request'
+        run: uv run --locked pre-commit run actionlint --all-files
 
       - name: Pytest
         run: uv run --locked pytest

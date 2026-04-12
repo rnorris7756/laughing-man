@@ -1,4 +1,5 @@
 # Ruff and ty run through `uv run --locked` so versions match CI (see uv.lock).
+# actionlint pins its own release (Go hook); see .github/workflows/ci.yml for PR-only CI.
 default_install_hook_types: [pre-commit]
 
 repos:
@@ -11,3 +12,8 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
