@@ -2,6 +2,7 @@
 name = "laughing-man"
 version = "1.2.0"
 description = "Webcam Laughing Man face overlay (MediaPipe + OpenCV + Pillow)"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "loguru>=0.7.3",
@@ -11,6 +12,11 @@ dependencies = [
     "pyvirtualcam>=0.15.0",
     "typer>=0.24.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/rnorris7756/laughing-man"
+Repository = "https://github.com/rnorris7756/laughing-man"
+Issues = "https://github.com/rnorris7756/laughing-man/issues"
 
 [project.scripts]
 laughing-man = "laughing_man:app"

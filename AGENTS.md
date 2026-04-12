@@ -4,6 +4,12 @@
 
 This is a **Python CLI** app (webcam face overlay) managed with **uv** — no Docker, databases, or external services required for development.
 
+### Git branches and pull requests
+
+- **Do not push directly to `master`.** The default branch is protected; CI and the release flow expect work to land via pull request.
+- **Use a topic branch** from current `master`, for example `feature/…`, `fix/…`, `docs/…`, or `ci/…`.
+- **Open a PR**, let CI pass, then merge (or follow the maintainer’s merge process).
+
 ### Quick reference
 
 | Action | Command |

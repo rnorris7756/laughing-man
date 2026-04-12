@@ -2,17 +2,32 @@
 
 Webcam **Laughing Man** face overlay (Ghost in the Shell style) using MediaPipe BlazeFace, OpenCV, and Pillow.
 
-## Setup
+## Install
 
-Install dependencies (e.g. with [uv](https://github.com/astral-sh/uv)):
+### From PyPI
+
+Stable releases are published on [PyPI](https://pypi.org/project/laughing-man/):
 
 ```bash
-uv sync
+pip install laughing-man
 ```
 
-Run the CLI:
+With [uv](https://github.com/astral-sh/uv) you can use:
 
 ```bash
+uv pip install laughing-man
+```
+
+After installing, run `laughing-man` or `laughing-man --help` (the `laughing-man` console script is on your `PATH`).
+
+### From source (development)
+
+Clone the repository and install with uv (include dev tools for tests and linting):
+
+```bash
+git clone https://github.com/rnorris7756/laughing-man.git
+cd laughing-man
+uv sync --group dev
 uv run laughing-man
 ```
 
