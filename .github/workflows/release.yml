@@ -63,6 +63,22 @@ jobs:
             exit "$code"
           fi
 
+      - name: Prepare release notes
+        id: release_meta
+        if: steps.bump.outputs.bumped == 'true'
+        run: |
+          set -euo pipefail
+          VERSION=$(uv run python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Commitizen range PREV..NEW = commits between tags (matches tag_format v$version).
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          if [ -n "$PREV_TAG" ]; then
+            PREV_VER="${PREV_TAG#v}"
+            uv run cz changelog "${PREV_VER}..${VERSION}" --dry-run > release_notes.md
+          else
+            uv run cz changelog "${VERSION}" --dry-run > release_notes.md
+          fi
+
       - name: Build sdist and wheel
         if: steps.bump.outputs.bumped == 'true'
         run: uv build
@@ -74,6 +90,15 @@ jobs:
         run: |
           git push origin "HEAD:${{ github.ref_name }}"
           git push origin --tags
+
+      - name: Create GitHub release
+        if: steps.bump.outputs.bumped == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.release_meta.outputs.version }}
+          body_path: release_notes.md
+          files: |
+            dist/*
 
       - name: Upload build artifacts
         if: steps.bump.outputs.bumped == 'true'
