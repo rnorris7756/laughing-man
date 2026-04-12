@@ -8,6 +8,12 @@ import typer
 
 from laughing_man.__version__ import __version__ as package_version
 from laughing_man.cli_options import *
+from laughing_man.constants import (
+    DEFAULT_NO_FACE_BLUR_FRAMES,
+    DEFAULT_ROI_LAMBDA,
+    DEFAULT_ROI_MOTION,
+    DEFAULT_SIZE_LAMBDA,
+)
 from laughing_man.logging_setup import configure_logging
 from laughing_man.postprocess import run_postprocess
 from laughing_man.run import run_overlay
@@ -21,21 +27,21 @@ typer_app = typer.Typer(
 
 @typer_app.command("run")
 def run(
-    full_range: FullRangeOpt,
-    gpu: GPUOpt,
-    roi_lambda: RoiLambdaOpt,
-    size_lambda: SizeLambdaOpt,
-    no_face_blur_frames: NoFaceBlurFramesOpt,
-    virtual_cam: VirtualCamOpt,
-    v4l2_device: V4l2DeviceOpt,
-    virtual_fps: VirtualFpsOpt,
-    no_preview: NoPreviewOpt,
-    debug: DebugOpt,
-    image: OverlayImageOpt,
-    overlay_scale: OverlayScaleOpt,
-    face_backend: FaceBackendOpt,
-    cascade_margin: CascadeMarginOpt,
-    roi_motion: RoiMotionOpt,
+    full_range: FullRangeOpt = False,
+    gpu: GPUOpt = False,
+    roi_lambda: RoiLambdaOpt = DEFAULT_ROI_LAMBDA,
+    size_lambda: SizeLambdaOpt = DEFAULT_SIZE_LAMBDA,
+    no_face_blur_frames: NoFaceBlurFramesOpt = DEFAULT_NO_FACE_BLUR_FRAMES,
+    virtual_cam: VirtualCamOpt = False,
+    v4l2_device: V4l2DeviceOpt = None,
+    virtual_fps: VirtualFpsOpt = 30.0,
+    no_preview: NoPreviewOpt = False,
+    debug: DebugOpt = False,
+    image: OverlayImageOpt = None,
+    overlay_scale: OverlayScaleOpt = 1.0,
+    face_backend: FaceBackendOpt = "blaze",
+    cascade_margin: CascadeMarginOpt = 0.0,
+    roi_motion: RoiMotionOpt = DEFAULT_ROI_MOTION,
 ) -> None:
     """Run the Laughing Man webcam overlay."""
     configure_logging(debug=debug)
@@ -60,19 +66,19 @@ def run(
 @typer_app.command("postprocess")
 def postprocess(
     input_path: PostprocessInputArg,
-    output_path: PostprocessOutputOpt,
-    full_range: FullRangeOpt,
-    gpu: GPUOpt,
-    roi_lambda: RoiLambdaOpt,
-    size_lambda: SizeLambdaOpt,
-    no_face_blur_frames: NoFaceBlurFramesOpt,
-    debug: DebugOpt,
-    image: OverlayImageOpt,
-    overlay_scale: OverlayScaleOpt,
-    face_backend: FaceBackendOpt,
-    cascade_margin: CascadeMarginOpt,
-    roi_motion: RoiMotionOpt,
-    preview: PostprocessPreviewOpt,
+    output_path: PostprocessOutputOpt = None,
+    full_range: FullRangeOpt = False,
+    gpu: GPUOpt = False,
+    roi_lambda: RoiLambdaOpt = DEFAULT_ROI_LAMBDA,
+    size_lambda: SizeLambdaOpt = DEFAULT_SIZE_LAMBDA,
+    no_face_blur_frames: NoFaceBlurFramesOpt = DEFAULT_NO_FACE_BLUR_FRAMES,
+    debug: DebugOpt = False,
+    image: OverlayImageOpt = None,
+    overlay_scale: OverlayScaleOpt = 1.0,
+    face_backend: FaceBackendOpt = "blaze",
+    cascade_margin: CascadeMarginOpt = 0.0,
+    roi_motion: RoiMotionOpt = DEFAULT_ROI_MOTION,
+    preview: PostprocessPreviewOpt = False,
 ) -> None:
     """Apply the Laughing Man face overlay to a still image or video file (offline)."""
     configure_logging(debug=debug)
@@ -98,7 +104,9 @@ def app() -> None:
     argv = sys.argv
     if len(argv) == 2 and argv[1] in ("-V", "--version"):
         typer.echo(f"laughing-man {package_version}")
-        raise typer.Exit(code=0)
+        # Use SystemExit, not typer.Exit: console_scripts wrap with sys.exit(app()),
+        # and an uncaught click.exceptions.Exit prints a traceback.
+        raise SystemExit(0)
     if len(argv) == 1:
         argv.append("run")
     elif len(argv) >= 2 and argv[1] not in (

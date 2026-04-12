@@ -7,19 +7,15 @@ from typing import Annotated, Literal
 
 import typer
 
-from laughing_man.constants import (
-    DEFAULT_NO_FACE_BLUR_FRAMES,
-    DEFAULT_ROI_LAMBDA,
-    DEFAULT_ROI_MOTION,
-    DEFAULT_SIZE_LAMBDA,
-)
+# Defaults belong on command parameters (``= ...``), not as the first argument to
+# ``typer.Option(...)`` — Typer 0.24+ passes those values into Click's decl parser
+# (see tests/test_cli_typer_regression.py).
 
 # --- Shared by ``run`` and ``postprocess`` ------------------------------------
 
 FullRangeOpt = Annotated[
     bool,
     typer.Option(
-        False,
         "--full-range",
         help=(
             "Use BlazeFace full-range model (better for faces that are small or far "
@@ -32,7 +28,6 @@ FullRangeOpt = Annotated[
 GPUOpt = Annotated[
     bool,
     typer.Option(
-        False,
         "--gpu",
         help=(
             "Use MediaPipe's TensorFlow Lite GPU delegate when possible. This is not "
@@ -46,7 +41,6 @@ GPUOpt = Annotated[
 RoiLambdaOpt = Annotated[
     float,
     typer.Option(
-        DEFAULT_ROI_LAMBDA,
         "--roi-lambda",
         min=0.0,
         max=1.0,
@@ -61,7 +55,6 @@ RoiLambdaOpt = Annotated[
 SizeLambdaOpt = Annotated[
     float,
     typer.Option(
-        DEFAULT_SIZE_LAMBDA,
         "--size-lambda",
         min=0.0,
         max=1.0,
@@ -76,7 +69,6 @@ SizeLambdaOpt = Annotated[
 NoFaceBlurFramesOpt = Annotated[
     int,
     typer.Option(
-        DEFAULT_NO_FACE_BLUR_FRAMES,
         "--no-face-blur-frames",
         min=1,
         help=(
@@ -89,7 +81,6 @@ NoFaceBlurFramesOpt = Annotated[
 DebugOpt = Annotated[
     bool,
     typer.Option(
-        False,
         "--debug",
         help=(
             "Verbose logging (overlay prefill, TFLite delegate, virtual camera when "
@@ -101,7 +92,6 @@ DebugOpt = Annotated[
 OverlayImageOpt = Annotated[
     Path | None,
     typer.Option(
-        None,
         "--image",
         exists=True,
         dir_okay=False,
@@ -116,7 +106,6 @@ OverlayImageOpt = Annotated[
 OverlayScaleOpt = Annotated[
     float,
     typer.Option(
-        1.0,
         "--scale",
         min=0.05,
         max=10.0,
@@ -131,7 +120,6 @@ OverlayScaleOpt = Annotated[
 FaceBackendOpt = Annotated[
     Literal["blaze", "yunet"],
     typer.Option(
-        "blaze",
         "--face-backend",
         help=(
             "Face detector: blaze = MediaPipe BlazeFace (default); yunet = OpenCV "
@@ -144,7 +132,6 @@ FaceBackendOpt = Annotated[
 CascadeMarginOpt = Annotated[
     float,
     typer.Option(
-        0.0,
         "--cascade-margin",
         min=0.0,
         max=2.0,
@@ -159,7 +146,6 @@ CascadeMarginOpt = Annotated[
 RoiMotionOpt = Annotated[
     Literal["ema", "kalman", "kalman_flow"],
     typer.Option(
-        DEFAULT_ROI_MOTION,
         "--roi-motion",
         help=(
             "How to stabilize the face box over time: ema = exponential moving average "
@@ -176,7 +162,6 @@ RoiMotionOpt = Annotated[
 VirtualCamOpt = Annotated[
     bool,
     typer.Option(
-        False,
         "--virtual-cam",
         help=(
             "Expose the composited video as a virtual webcam (Linux: v4l2loopback) so "
@@ -189,7 +174,6 @@ VirtualCamOpt = Annotated[
 V4l2DeviceOpt = Annotated[
     str | None,
     typer.Option(
-        None,
         "--v4l2-device",
         help=(
             "Virtual camera device path (e.g. /dev/video10). If omitted, the first "
@@ -201,7 +185,6 @@ V4l2DeviceOpt = Annotated[
 VirtualFpsOpt = Annotated[
     float,
     typer.Option(
-        30.0,
         "--virtual-fps",
         min=0.1,
         help="Target frame rate for the virtual camera (used with --virtual-cam).",
@@ -211,7 +194,6 @@ VirtualFpsOpt = Annotated[
 NoPreviewOpt = Annotated[
     bool,
     typer.Option(
-        False,
         "--no-preview",
         help=(
             "Do not open the OpenCV preview window. Use with --virtual-cam to stream "
@@ -237,7 +219,6 @@ PostprocessInputArg = Annotated[
 PostprocessOutputOpt = Annotated[
     Path | None,
     typer.Option(
-        None,
         "--output",
         "-o",
         dir_okay=False,
@@ -249,7 +230,6 @@ PostprocessOutputOpt = Annotated[
 PostprocessPreviewOpt = Annotated[
     bool,
     typer.Option(
-        False,
         "--preview",
         help="Show an OpenCV preview window while processing.",
     ),
