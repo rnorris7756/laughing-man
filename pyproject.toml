@@ -68,6 +68,7 @@ version = "1.1.0"
 tag_format = "v$version"
 version_files = [
     "pyproject.toml:^version",
+    "src/laughing_man/__version__.py:__version__",
 ]
 post_bump_hooks = ["uv lock"]
 update_changelog_on_bump = true
