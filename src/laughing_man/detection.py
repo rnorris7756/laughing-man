@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 import cv2
 import mediapipe as mp
@@ -18,7 +20,7 @@ from laughing_man.constants import (
 
 
 def pick_largest_face(
-    detections: list,
+    detections: Iterable[Any],
     min_w: int,
     min_h: int,
 ) -> tuple[int, int, int, int] | None:
@@ -63,7 +65,7 @@ def mediapipe_detect_face(
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
     result = detector.detect_for_video(mp_image, timestamp_ms)
     min_w, min_h = MIN_FACE_SIZE
-    return pick_largest_face(list(result.detections), min_w, min_h)
+    return pick_largest_face(result.detections, min_w, min_h)
 
 
 def face_detector_options(model_path: Path, *, use_gpu: bool) -> vision.FaceDetectorOptions:

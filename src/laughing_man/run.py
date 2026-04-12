@@ -39,6 +39,7 @@ from laughing_man.model import (
     resolve_yunet_model,
 )
 from laughing_man.overlay import (
+    build_overlay_rgb_cache,
     load_overlay_images,
     make_overlay_mask_resized,
     prefill_rotated_overlay_cache_inplace,
@@ -228,6 +229,9 @@ def run_overlay(
             logger.error("Rotated overlay pre-computation failed: {}", e)
             raise typer.Exit(code=1) from e
 
+        overlay_rgb_cache = build_overlay_rgb_cache(img_cache)
+        mask_l_arr = np.asarray(mask_img)
+
         use_terminal_tuning = stdin_interactive_tuning_available()
         terminal_listener_stop = threading.Event()
         terminal_user_quit = threading.Event()
@@ -290,10 +294,8 @@ def run_overlay(
                     timestamp_ms = int((time.monotonic() - t0) * 1000.0)
 
                     cache_idx = rot_angle // ROT_RESO
-                    tmp_img = img_cache[cache_idx][0]
-
-                    overlay_rgb = np.asarray(tmp_img.convert("RGB"))
-                    mask_l = np.asarray(mask_img)
+                    overlay_rgb = overlay_rgb_cache[cache_idx]
+                    mask_l = mask_l_arr
 
                     last_raw_face = face_source.face_box(frame, timestamp_ms)
 
