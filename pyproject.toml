@@ -1,6 +1,6 @@
 [project]
 name = "laughing-man"
-version = "1.2.1"
+version = "1.2.2"
 description = "Webcam Laughing Man face overlay (MediaPipe + OpenCV + Pillow)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -71,7 +71,7 @@ include = ["src", "tests", "scripts"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "1.2.1"
+version = "1.2.2"
 tag_format = "v$version"
 version_files = [
     "pyproject.toml:^version",
