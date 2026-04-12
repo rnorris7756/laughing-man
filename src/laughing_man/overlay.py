@@ -6,6 +6,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import typer
 from loguru import logger
 from PIL import Image, ImageChops, ImageDraw
@@ -183,6 +184,34 @@ def make_overlay_mask_resized(
         )
         mask_img = ImageChops.lighter(ImageChops.lighter(mask_img, st_alpha), rot_alpha)
     return mask_img.resize((min_dim, min_dim))
+
+
+def build_overlay_rgb_cache(img_cache: list[list[Image.Image]]) -> list[np.ndarray]:
+    """
+    Convert the rotation prefill cache to uint8 RGB arrays for the capture loop.
+
+    Avoids per-frame ``PIL.Image.convert('RGB')`` and :func:`numpy.asarray` in the
+    hot path. When every slot references the same image (custom ``--image``),
+    a single array is shared across indices.
+
+    Parameters
+    ----------
+    img_cache
+        Filled by :func:`prefill_rotated_overlay_cache_inplace` (one RGB image per
+        discrete rotation step).
+
+    Returns
+    -------
+    list[numpy.ndarray]
+        Length matches ``img_cache``; each array is shape ``(H, W, 3)`` uint8.
+    """
+    if not img_cache:
+        return []
+    first = img_cache[0][0]
+    if all(img_cache[i][0] is first for i in range(1, len(img_cache))):
+        rgb = np.asarray(first.convert("RGB"), dtype=np.uint8)
+        return [rgb] * len(img_cache)
+    return [np.asarray(img_cache[i][0].convert("RGB"), dtype=np.uint8) for i in range(len(img_cache))]
 
 
 def prefill_rotated_overlay_cache_inplace(

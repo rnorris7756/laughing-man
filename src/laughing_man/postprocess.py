@@ -24,6 +24,7 @@ from laughing_man.model import (
     resolve_yunet_model,
 )
 from laughing_man.overlay import (
+    build_overlay_rgb_cache,
     load_overlay_images,
     make_overlay_mask_resized,
     prefill_rotated_overlay_cache_inplace,
@@ -187,6 +188,8 @@ def run_postprocess(
         logger.error("Overlay pre-computation failed: {}", e)
         raise typer.Exit(code=1) from e
 
+    overlay_rgb_cache = build_overlay_rgb_cache(img_cache)
+
     deps = PipelineDeps(privacy=GaussianBlurPrivacy())
     roi_state = RoiState()
 
@@ -271,8 +274,7 @@ def run_postprocess(
 
                 timestamp_ms = int((time.monotonic() - t0) * 1000.0)
                 cache_idx = rot_angle // ROT_RESO
-                tmp_img = img_cache[cache_idx][0]
-                overlay_rgb = np.asarray(tmp_img.convert("RGB"))
+                overlay_rgb = overlay_rgb_cache[cache_idx]
 
                 last_raw_face = face_source.face_box(frame, timestamp_ms)
 
