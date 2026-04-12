@@ -9,3 +9,11 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Local scratch / fixture captures at repo root (avoid accidental commits)
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+/*.webp
+/*.bmp
