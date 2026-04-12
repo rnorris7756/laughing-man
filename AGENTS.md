@@ -60,6 +60,10 @@ Common **types:** `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `b
 
 Do **not** use `feat(dev)` for pre-commit hooks, lint rules, or “DX” that does not change the application for end users; prefer **`chore(dev)`**, **`ci`**, or **`build`** depending on what you touched.
 
+### Package version
+
+**Do not hand-edit** the package version in **`pyproject.toml`** (`[project].version`) or in **`src/laughing_man/__version__.py`**. Releases are driven by [Commitizen](https://github.com/commitizen-tools/commitizen) (`cz bump`) and the **Release** GitHub Actions workflow: they bump those files together with the changelog and Git tag. Manual edits can desync the repo from existing tags and break CI (for example duplicate tag errors) or PyPI.
+
 ## Planning work and commits
 
 When planning a change set, **sketch the commits in advance**: what each commit will contain and its conventional message. That reduces the risk of **partial-file staging** (`git add -p` or staging only some hunks) mixing unrelated edits in the same file, which is easy to get wrong and produces confusing history.
