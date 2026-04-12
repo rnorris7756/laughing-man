@@ -55,6 +55,8 @@ jobs:
         if: steps.bump.outputs.bumped == 'true'
         run: uv build
 
+      # Only when cz bump exited 0: a release commit and vX.Y.Z tag exist locally.
+      # Exit 3/21 never create a tag, so this step is skipped — no tags pushed.
       - name: Push release commit and tag
         if: steps.bump.outputs.bumped == 'true'
         run: |
