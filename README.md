@@ -22,17 +22,37 @@ After installing, run `laughing-man` or `laughing-man --help` (the `laughing-man
 
 ### From source (development)
 
-Clone the repository and install with uv (include dev tools for tests and linting):
+You need [uv](https://github.com/astral-sh/uv) on your `PATH`. Clone the repository:
 
 ```bash
 git clone https://github.com/rnorris7756/laughing-man.git
 cd laughing-man
+```
+
+#### Using direnv (recommended)
+
+[direnv](https://direnv.net/) loads the repo’s `.envrc` automatically when you `cd` into the project (after you **allow** it once per machine). That keeps the development environment consistent without manually activating a venv each time:
+
+1. Install **direnv** and [hook it into your shell](https://direnv.net/docs/hook.html) (Bash, Zsh, Fish, etc.).
+2. In the repo root, run **`direnv allow`** so `.envrc` is trusted.
+3. The next time the environment loads, `.envrc` will:
+   - create **`.venv`** and run **`uv sync --group dev`** if the venv does not exist yet (installs runtime + dev dependencies from **`uv.lock`**);
+   - **`source`** that venv whenever you are inside the directory;
+   - run **`uv run pre-commit install`** if the Git **pre-commit** hook is missing (so Ruff and ty match CI before each commit).
+
+After that, use `laughing-man` or `uv run laughing-man` as usual; commands see the activated environment while you stay in the tree.
+
+#### Without direnv
+
+Install dependencies and the pre-commit hook yourself:
+
+```bash
 uv sync --group dev
-uv run pre-commit install   # skip if you use direnv — see below
+uv run pre-commit install
 uv run laughing-man
 ```
 
-If you use [direnv](https://direnv.net/) with the repo’s `.envrc`, the first time you enter the directory it creates the venv and installs the **pre-commit** Git hook when it is missing. Otherwise run `uv run pre-commit install` once so Ruff and ty run before each commit (same checks as CI). You need [uv](https://github.com/astral-sh/uv) on your `PATH` when Git runs the hooks.
+Run `uv run pre-commit install` once per clone so Ruff and ty run before each commit (same checks as CI). Git invokes hooks with **`uv`** on your `PATH`.
 
 ## Virtual webcam (Discord, OBS, browsers)
 
