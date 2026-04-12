@@ -1,6 +1,6 @@
 [project]
 name = "laughing-man"
-version = "0.1.0"
+version = "1.0.0"
 description = "Webcam Laughing Man face overlay (MediaPipe + OpenCV + Pillow)"
 requires-python = ">=3.10"
 dependencies = [
@@ -30,6 +30,7 @@ link-mode = "copy"
 
 [dependency-groups]
 dev = [
+    "commitizen>=4.13.10",
     "pytest>=9.0.3",
     "ruff>=0.15.10",
     "ty>=0.0.29",
@@ -60,3 +61,16 @@ python-platform = "all"
 
 [tool.ty.src]
 include = ["src", "tests", "scripts"]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "1.0.0"
+tag_format = "v$version"
+version_files = [
+    "pyproject.toml:^version",
+]
+post_bump_hooks = ["uv lock"]
+update_changelog_on_bump = true
+changelog_file = "CHANGELOG.md"
+changelog_merge_prereleases = true
+bump_message = "chore(release): v$new_version [skip ci]"
