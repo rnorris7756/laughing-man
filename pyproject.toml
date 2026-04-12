@@ -37,6 +37,7 @@ link-mode = "copy"
 [dependency-groups]
 dev = [
     "commitizen>=4.13.10",
+    "pre-commit>=4.5.1",
     "pytest>=9.0.3",
     "ruff>=0.15.10",
     "ty>=0.0.29",

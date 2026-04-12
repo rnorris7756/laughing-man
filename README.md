@@ -28,8 +28,11 @@ Clone the repository and install with uv (include dev tools for tests and lintin
 git clone https://github.com/rnorris7756/laughing-man.git
 cd laughing-man
 uv sync --group dev
+uv run pre-commit install
 uv run laughing-man
 ```
+
+`pre-commit install` sets up git hooks so Ruff and ty run before each commit (same checks as CI). You need [uv](https://github.com/astral-sh/uv) on your `PATH` when Git runs the hooks.
 
 ## Virtual webcam (Discord, OBS, browsers)
 

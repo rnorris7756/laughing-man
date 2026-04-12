@@ -15,6 +15,8 @@ This is a **Python CLI** app (webcam face overlay) managed with **uv** — no Do
 | Action | Command |
 | --- | --- |
 | Install / sync deps | `uv sync --group dev` |
+| Install git hooks (once per clone) | `uv run pre-commit install` |
+| Lint + typecheck (same as CI) | `uv run pre-commit run --all-files` |
 | Lint (Ruff) | `uv run ruff check src tests scripts` |
 | Typecheck (ty) | `uv run ty check` |
 | Run tests | `uv run pytest` (add `-v` for verbose) |
@@ -62,7 +64,15 @@ When planning a change set, **sketch the commits in advance**: what each commit 
 
 This project uses **Ruff** for linting/formatting and **ty** (Astral) for static type checking. **ty** is chosen for speed, alignment with Ruff/uv in the Astral ecosystem, and solid diagnostics; it is configured in `pyproject.toml` under `[tool.ty]`.
 
+**Pre-commit** runs the same checks as CI: one hook runs `uv run --locked bash -ec 'ruff … && ty …'`, so Ruff and ty versions always come from `uv.lock` (same as GitHub Actions). After `uv sync --group dev`, run `uv run pre-commit install` once per clone; commits then run lint and typecheck automatically. [uv](https://github.com/astral-sh/uv) must be on your `PATH` when Git invokes the hooks. On Windows, use **Git Bash** (or another environment where `bash` is available), which matches typical `pre-commit` setups.
+
 From the repo root (with dev dependencies installed, e.g. `uv sync --group dev`):
+
+```bash
+uv run pre-commit run --all-files
+```
+
+Individual tools (equivalent to the hooks):
 
 ```bash
 uv run ruff check src tests scripts
