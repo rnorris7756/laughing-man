@@ -6,6 +6,7 @@ import sys
 
 import typer
 
+from laughing_man.__version__ import __version__ as package_version
 from laughing_man.cli_options import *
 from laughing_man.logging_setup import configure_logging
 from laughing_man.postprocess import run_postprocess
@@ -95,9 +96,19 @@ def postprocess(
 def app() -> None:
     """CLI entry: default subcommand ``run`` when omitted (backward compatible)."""
     argv = sys.argv
+    if len(argv) == 2 and argv[1] in ("-V", "--version"):
+        typer.echo(f"laughing-man {package_version}")
+        raise typer.Exit(code=0)
     if len(argv) == 1:
         argv.append("run")
-    elif len(argv) >= 2 and argv[1] not in ("run", "postprocess", "-h", "--help"):
+    elif len(argv) >= 2 and argv[1] not in (
+        "run",
+        "postprocess",
+        "-h",
+        "--help",
+        "-V",
+        "--version",
+    ):
         argv.insert(1, "run")
     typer_app()
 
