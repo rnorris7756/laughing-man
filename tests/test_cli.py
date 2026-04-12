@@ -29,12 +29,7 @@ def test_version_exits_zero(
 
 def test_version_console_scripts_sys_exit_app_no_traceback() -> None:
     """Console scripts use ``sys.exit(app())``; ``-V`` must not leave a traceback."""
-    code = (
-        "import sys\n"
-        "sys.argv = ['laughing-man', '-V']\n"
-        "from laughing_man.cli import app\n"
-        "sys.exit(app())\n"
-    )
+    code = "import sys\nsys.argv = ['laughing-man', '-V']\nfrom laughing_man.cli import app\nsys.exit(app())\n"
     result = subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,
