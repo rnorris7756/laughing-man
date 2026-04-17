@@ -64,3 +64,6 @@ _QUIT_PREVIEW_KEY_CODES = frozenset(
 )
 
 CAMERA_INDEX = 0
+
+# ``auto`` = first non-v4l2loopback device on Linux (see ``open_webcam``).
+DEFAULT_CAMERA = "auto"

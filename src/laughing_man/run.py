@@ -20,7 +20,7 @@ from pyvirtualcam import PixelFormat
 from laughing_man.camera import open_webcam
 from laughing_man.cascade import CascadedFaceBoxSource
 from laughing_man.constants import (
-    CAMERA_INDEX,
+    DEFAULT_CAMERA,
     DEFAULT_ROI_MOTION,
     KEY_WAIT_DELAY_MS,
     LAMBDA_TUNE_STEP,
@@ -67,6 +67,7 @@ def run_overlay(
     v4l2_device: str | None,
     virtual_fps: float,
     show_preview: bool,
+    camera: str = DEFAULT_CAMERA,
     overlay_image: Path | None,
     overlay_scale: float,
     face_backend: Literal["blaze", "yunet"] = "blaze",
@@ -103,6 +104,9 @@ def run_overlay(
     show_preview
         If True, show the OpenCV preview window. Disable with ``--no-preview``
         when streaming only to the virtual device.
+    camera
+        ``auto`` (default), integer index, or ``/dev/video*``. On Linux, ``auto``
+        skips v4l2loopback output devices so the physical webcam is used.
     overlay_image
         If set, use this file as the face overlay instead of the bundled defaults
         in ``laughing_man.assets`` (``limg.png`` / ``ltext.png``).
@@ -122,7 +126,7 @@ def run_overlay(
 
     deps = PipelineDeps(privacy=GaussianBlurPrivacy())
 
-    cap = open_webcam(CAMERA_INDEX)
+    cap = open_webcam(camera)
 
     if show_preview:
         cv2.namedWindow(MAIN_WIN_NAME, cv2.WINDOW_AUTOSIZE)
