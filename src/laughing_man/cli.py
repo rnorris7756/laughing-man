@@ -9,6 +9,7 @@ import typer
 from laughing_man.__version__ import __version__ as package_version
 from laughing_man.cli_options import *
 from laughing_man.constants import (
+    DEFAULT_CAMERA,
     DEFAULT_NO_FACE_BLUR_FRAMES,
     DEFAULT_ROI_LAMBDA,
     DEFAULT_ROI_MOTION,
@@ -29,6 +30,7 @@ typer_app = typer.Typer(
 def run(
     full_range: FullRangeOpt = False,
     gpu: GPUOpt = False,
+    camera: CameraOpt = DEFAULT_CAMERA,
     roi_lambda: RoiLambdaOpt = DEFAULT_ROI_LAMBDA,
     size_lambda: SizeLambdaOpt = DEFAULT_SIZE_LAMBDA,
     no_face_blur_frames: NoFaceBlurFramesOpt = DEFAULT_NO_FACE_BLUR_FRAMES,
@@ -48,6 +50,7 @@ def run(
     run_overlay(
         full_range=full_range,
         use_gpu=gpu,
+        camera=camera,
         roi_lambda=roi_lambda,
         size_lambda=size_lambda,
         no_face_blur_frames=no_face_blur_frames,

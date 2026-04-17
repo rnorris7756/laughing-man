@@ -159,6 +159,18 @@ RoiMotionOpt = Annotated[
 
 # --- ``run`` only -------------------------------------------------------------
 
+CameraOpt = Annotated[
+    str,
+    typer.Option(
+        "--camera",
+        help=(
+            "Webcam input: 'auto' (default; on Linux, first /dev/video* that is not "
+            "v4l2loopback), a non-negative index, or a path like /dev/video1. "
+            "Do not use a v4l2loopback node as input."
+        ),
+    ),
+]
+
 VirtualCamOpt = Annotated[
     bool,
     typer.Option(
@@ -236,6 +248,7 @@ PostprocessPreviewOpt = Annotated[
 ]
 
 __all__ = (
+    "CameraOpt",
     "CascadeMarginOpt",
     "DebugOpt",
     "FaceBackendOpt",

@@ -80,6 +80,8 @@ laughing-man --virtual-cam --v4l2-device /dev/video10
 
 Use `--no-preview` to stream only to the virtual camera (no OpenCV window); stop with Ctrl+C.
 
+If the module loads at boot and grabs `/dev/video0`, the real webcam may move to `/dev/video1`. The CLI defaults to `--camera auto`, which on Linux picks the first `/dev/video*` that is **not** a v4l2loopback output (opening loopback for capture can crash OpenCV). You can also pin the real device with `--camera /dev/video1` or load loopback on a fixed high number: `sudo modprobe v4l2loopback devices=1 video_nr=10 card_label="LaughingMan"`.
+
 Package names vary by distro (e.g. `v4l2loopback-dkms` on Debian/Ubuntu).
 
 ### Other platforms
