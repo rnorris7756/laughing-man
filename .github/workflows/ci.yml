@@ -5,9 +5,14 @@ on:
     branches: [master, main]
   pull_request:
     branches: [master, main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  lint-and-test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,8 +38,24 @@ jobs:
         run: |
           uv run --locked cz check --rev-range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
-      - name: Lint (pre-commit: ruff + ty)
+      - name: "Lint (pre-commit: ruff + ty)"
         run: uv run --locked pre-commit run --all-files
 
-      - name: Pytest
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Python version
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --locked --group dev --python 3.12
+
+      - name: Unit tests (pytest)
         run: uv run --locked pytest

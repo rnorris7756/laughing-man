@@ -1,7 +1,21 @@
 # Ruff and ty run through `uv run --locked` so versions match CI (see uv.lock).
+# GitHub Actions workflows: use actionlint (not generic check-yaml) — PyYAML cannot
+# load workflow files reliably (expressions, etc.).
 default_install_hook_types: [pre-commit]
 
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+        exclude: ^\.github/workflows/
+        args: [--unsafe]
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
   - repo: local
     hooks:
       # One process: parallel hooks each spawned `uv run` and could race on `.venv` (e.g. NFS).
