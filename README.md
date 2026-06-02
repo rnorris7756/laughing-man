@@ -2,6 +2,10 @@
 
 Webcam **Laughing Man** face overlay (Ghost in the Shell style) using MediaPipe BlazeFace, OpenCV, and Pillow.
 
+## Demo
+
+A short terminal + face-overlay demo can be recorded with the local harness in [`docs/demo/README.md`](docs/demo/README.md). Replace this note with the generated video/GIF asset before merging the README demo PR.
+
 ## Install
 
 ### From PyPI
