@@ -4,13 +4,17 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Annotated, Literal
 
 import typer
 
-from readme_demo_harness import (
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.readme_demo_harness import (
     BUILD,
     FINAL_GIF,
     FINAL_MP4,

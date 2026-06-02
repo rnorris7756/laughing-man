@@ -5,11 +5,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-import readme_demo_harness as harness  # noqa: E402
+from scripts import readme_demo_harness as harness  # noqa: E402
 
 
 def test_app_command_uses_virtual_camera_headless_by_default() -> None:
