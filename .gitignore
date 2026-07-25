@@ -17,3 +17,6 @@ build/
 /*.gif
 /*.webp
 /*.bmp
+
+# Local README demo renders
+/docs/demo/build/
